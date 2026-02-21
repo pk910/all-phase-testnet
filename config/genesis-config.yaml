@@ -61,6 +61,13 @@ dora_image: "ethpandaops/dora:latest"
 
 # Spammer
 spamoor_image: "ethpandaops/spamoor:latest"
+spamoor_startup_spammers:
+  - name: "EOA Spammer"
+    scenario: "eoatx"
+    config:
+      throughput: 20
+      max_pending: 40
+      max_wallets: 20
 
 # Blockscout
 blockscout_image: "ghcr.io/blockscout/blockscout:latest"

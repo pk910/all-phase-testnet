@@ -526,6 +526,32 @@ start_spamoor() {
     docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf /hostdata/spamoor 2>/dev/null || true
     mkdir -p "$DATA_DIR/spamoor"
 
+    # Generate startup spammer config from genesis-config.yaml
+    local spammer_args=()
+    local spammer_config="$DATA_DIR/spamoor/startup-spammers.yaml"
+    local has_spammers
+    has_spammers=$(python3 -c "
+import yaml
+with open('$CONFIG_DIR/genesis-config.yaml') as f:
+    d = yaml.safe_load(f) or {}
+try:
+    with open('$CONFIG_DIR/genesis-config.local.yaml') as f:
+        d.update(yaml.safe_load(f) or {})
+except FileNotFoundError:
+    pass
+spammers = d.get('spamoor_startup_spammers', [])
+if spammers:
+    with open('$spammer_config', 'w') as f:
+        yaml.dump(spammers, f, default_flow_style=False)
+    print('yes')
+else:
+    print('no')
+")
+    if [ "$has_spammers" = "yes" ]; then
+        spammer_args+=(--startup-spammer=/data/startup-spammers.yaml)
+        log "  Startup spammer config generated"
+    fi
+
     docker run -d --name "${CONTAINER_PREFIX}-spamoor" \
         --network "$DOCKER_NETWORK" \
         -u "$DOCKER_UID" \
@@ -540,7 +566,8 @@ start_spamoor() {
         --rpchost="http://${CONTAINER_PREFIX}-node3-el:8545" \
         --port=8080 \
         --db=/data/spamoor.db \
-        --without-batcher
+        --without-batcher \
+        "${spammer_args[@]}"
 
     log "  Spamoor container: ${CONTAINER_PREFIX}-spamoor [http://localhost:8091]"
 }
