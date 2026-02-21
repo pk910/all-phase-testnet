@@ -706,6 +706,7 @@ cmd_status() {
             node2-cl) log "  node2-cl  lodestar v1.38.0 -> latest       $status_str" ;;
             node1-cl) log "  node1-cl  lighthouse v5.3.0 -> latest      $status_str" ;;
         esac
+    done
 }
 
 #############################################################################
