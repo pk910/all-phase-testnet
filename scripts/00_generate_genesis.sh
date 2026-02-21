@@ -47,22 +47,20 @@ CL_GENESIS_TIME=$((GENESIS_TIMESTAMP + GENESIS_DELAY))
 TTD=$(read_config "terminal_total_difficulty")
 if [ -z "$TTD" ] || [ "$TTD" = "null" ]; then
     # Auto-calculate: target merge ~1 epoch after bellatrix
-    MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 1))
-    # Total mining time from EL start = genesis_delay + merge_target in seconds
-    TOTAL_MINING_SECONDS=$((GENESIS_DELAY + MERGE_TARGET_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
-    # Two phases of mining:
-    #   Pre-bellatrix: 2 miners (node1 geth + node3 besu), ~14s avg block time
-    #   Post-bellatrix: 4 miners (+ 2 extra), ~7s avg block time
+    # Extra miners start at bellatrix; TTD must be unreachable by 2 base miners alone.
+    # Two phases:
+    #   Pre-bellatrix: 2 CPU miners (geth + besu), ~8s avg block time
+    #   Post-bellatrix: 4 CPU miners (+ 2 extra from merge boost), ~4s avg
     BELLATRIX_SECONDS=$((GENESIS_DELAY + BELLATRIX_FORK_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
-    POST_BELLATRIX_SECONDS=$((TOTAL_MINING_SECONDS - BELLATRIX_SECONDS))
-    BLOCKS_PRE=$((BELLATRIX_SECONDS / 14))
-    BLOCKS_POST=$((POST_BELLATRIX_SECONDS / 7))
+    POST_BELLATRIX_SECONDS=$((1 * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))  # 1 epoch target
+    BLOCKS_PRE=$((BELLATRIX_SECONDS / 8))
+    BLOCKS_POST=$((POST_BELLATRIX_SECONDS / 4))
     ESTIMATED_BLOCKS=$((BLOCKS_PRE + BLOCKS_POST))
-    # Use genesis difficulty as average (difficulty adjusts up from here)
     GENESIS_DIFF_DEC=$(printf "%d" "$GENESIS_DIFFICULTY")
     TTD=$((ESTIMATED_BLOCKS * GENESIS_DIFF_DEC))
-    log "Auto-calculated TTD: $TTD (target merge at ~epoch $MERGE_TARGET_EPOCH)"
-    log "  Mining: ${BELLATRIX_SECONDS}s pre-bellatrix (~$BLOCKS_PRE blocks@14s) + ${POST_BELLATRIX_SECONDS}s post (~$BLOCKS_POST blocks@7s)"
+    MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 1))
+    log "Auto-calculated TTD: $TTD (target merge ~epoch $MERGE_TARGET_EPOCH)"
+    log "  Mining: ${BELLATRIX_SECONDS}s pre-bellatrix (~$BLOCKS_PRE blocks@8s) + ${POST_BELLATRIX_SECONDS}s post (~$BLOCKS_POST blocks@4s)"
     log "  Total ~$ESTIMATED_BLOCKS blocks × $GENESIS_DIFF_DEC avg difficulty"
 else
     log "Using manual TTD: $TTD"
