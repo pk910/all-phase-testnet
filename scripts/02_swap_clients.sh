@@ -320,6 +320,16 @@ swap_node1_el() {
     docker stop -t 30 "${CONTAINER_PREFIX}-node1-el" >/dev/null 2>&1 || true
     docker rm -f "${CONTAINER_PREFIX}-node1-el" >/dev/null 2>&1 || true
 
+    # Re-init with full genesis to update chain config (blobSchedule etc.)
+    log "  Re-initializing datadir with new genesis (chain config update)..."
+    docker run --rm \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
+        -v "$DATA_DIR/node1/el:/data" \
+        "$EL_IMAGE_NEW_GETH" \
+        --datadir /data init /genesis.json 2>&1 | tail -3
+
     # Start new geth (same datadir, no mining flags)
     log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node1-el" \
@@ -366,6 +376,16 @@ swap_node2_el() {
     log "  Stopping old geth..."
     docker stop -t 30 "${CONTAINER_PREFIX}-node2-el" >/dev/null 2>&1 || true
     docker rm -f "${CONTAINER_PREFIX}-node2-el" >/dev/null 2>&1 || true
+
+    # Re-init with full genesis to update chain config (blobSchedule etc.)
+    log "  Re-initializing datadir with new genesis (chain config update)..."
+    docker run --rm \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
+        -v "$DATA_DIR/node2/el:/data" \
+        "$EL_IMAGE_NEW_GETH" \
+        --datadir /data init /genesis.json 2>&1 | tail -3
 
     # Build bootnode list
     local node1_enode node3_enode bootnode_list=""
