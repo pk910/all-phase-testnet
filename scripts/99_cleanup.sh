@@ -25,6 +25,12 @@ for arg in "$@"; do
     esac
 done
 
+# Kill background task sessions (merge boost + swap daemon)
+tmux kill-session -t allphase-tasks 2>/dev/null && log "Killed tmux session 'allphase-tasks'" || true
+tmux kill-session -t allphase-swap 2>/dev/null && log "Killed tmux session 'allphase-swap'" || true
+screen -X -S allphase-tasks quit 2>/dev/null || true
+screen -X -S allphase-swap quit 2>/dev/null || true
+
 # Stop extra miners if any
 bash "$PROJECT_DIR/scripts/03_extra_miner.sh" stop all 2>/dev/null || true
 

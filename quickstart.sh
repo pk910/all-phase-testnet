@@ -27,21 +27,30 @@ echo ""
 bash "$PROJECT_DIR/scripts/01_start_network.sh"
 
 #############################################################################
-# Step 3: Merge boost — start extra miners at bellatrix, stop after merge
+# Step 3: Launch merge boost + swap daemon in tmux/screen
 #############################################################################
+echo ""
+echo "--- Step 3: Starting background tasks (merge boost + swap daemon) ---"
+echo ""
+
+# Create a wrapper script that runs merge boost then swap daemon sequentially
+TASK_SCRIPT="$PROJECT_DIR/generated/.quickstart_tasks.sh"
+cat > "$TASK_SCRIPT" << 'TASKEOF'
+#!/bin/bash
+set -e
+PROJECT_DIR="$1"
+source "$PROJECT_DIR/scripts/lib/common.sh"
 
 BELLATRIX_EPOCH=$(read_config "bellatrix_fork_epoch")
 SLOTS_PER_EPOCH=$(read_config "slots_per_epoch")
-SECONDS_PER_SLOT=$(read_config "seconds_per_slot")
 EXTRA_MINERS=2
 
+#--- Merge boost (background) ---
 merge_boost() {
     local bellatrix_slot=$((BELLATRIX_EPOCH * SLOTS_PER_EPOCH))
-
     log "=== Merge Boost ==="
     log "  Waiting for bellatrix (epoch $BELLATRIX_EPOCH, slot $bellatrix_slot) to start $EXTRA_MINERS extra miners..."
 
-    # Wait for bellatrix
     while true; do
         local slot
         slot=$(curl -s --max-time 3 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
@@ -52,10 +61,8 @@ merge_boost() {
         sleep 6
     done
 
-    # Start extra miners
     bash "$PROJECT_DIR/scripts/03_extra_miner.sh" start "$EXTRA_MINERS"
 
-    # Wait for merge (block difficulty drops to 0)
     log "  Miners running. Waiting for merge (difficulty=0)..."
     while true; do
         local difficulty
@@ -70,42 +77,45 @@ merge_boost() {
         sleep 6
     done
 
-    # Stop extra miners
     bash "$PROJECT_DIR/scripts/03_extra_miner.sh" stop all
     log "  Merge boost complete."
 }
 
-echo ""
-echo "--- Step 3: Merge boost (background) ---"
-echo ""
-
 # Run merge boost in background
 merge_boost &
 MERGE_BOOST_PID=$!
-echo "Merge boost running in background (PID: $MERGE_BOOST_PID)"
-echo "  Will start $EXTRA_MINERS extra miners at bellatrix, stop them after merge."
 
-#############################################################################
-# Step 4: Run swap daemon
-#############################################################################
-echo ""
-echo "--- Step 4: Starting swap daemon ---"
-echo ""
+#--- Swap daemon (foreground in this session) ---
+log "Starting swap daemon..."
+bash "$PROJECT_DIR/scripts/02_swap_clients.sh" daemon &
+SWAP_PID=$!
+
+# Wait for both
+wait "$MERGE_BOOST_PID" 2>/dev/null || true
+wait "$SWAP_PID" 2>/dev/null || true
+
+log "All background tasks finished."
+echo "Press enter to close."
+read
+TASKEOF
+chmod +x "$TASK_SCRIPT"
 
 if command -v tmux &>/dev/null; then
-    tmux new-session -d -s allphase-swap "bash '$PROJECT_DIR/scripts/02_swap_clients.sh' daemon; echo 'Swap daemon finished. Press enter to close.'; read"
-    echo "Swap daemon started in tmux session 'allphase-swap'"
-    echo "  Attach: tmux attach -t allphase-swap"
+    # Kill old session if exists
+    tmux kill-session -t allphase-tasks 2>/dev/null || true
+    tmux new-session -d -s allphase-tasks "bash '$TASK_SCRIPT' '$PROJECT_DIR'"
+    echo "Background tasks started in tmux session 'allphase-tasks'"
+    echo "  Attach: tmux attach -t allphase-tasks"
 elif command -v screen &>/dev/null; then
-    screen -dmS allphase-swap bash "$PROJECT_DIR/scripts/02_swap_clients.sh" daemon
-    echo "Swap daemon started in screen session 'allphase-swap'"
-    echo "  Attach: screen -r allphase-swap"
+    screen -wipe 2>/dev/null || true
+    screen -dmS allphase-tasks bash "$TASK_SCRIPT" "$PROJECT_DIR"
+    echo "Background tasks started in screen session 'allphase-tasks'"
+    echo "  Attach: screen -r allphase-tasks"
 else
-    echo "Neither tmux nor screen found. Running swap daemon in foreground."
-    echo "Press Ctrl+C to stop the daemon (network will keep running)."
+    echo "WARNING: Neither tmux nor screen found."
+    echo "Running merge boost + swap daemon in foreground (Ctrl+C to stop)."
     echo ""
-    bash "$PROJECT_DIR/scripts/02_swap_clients.sh" daemon
-    wait "$MERGE_BOOST_PID" 2>/dev/null || true
+    bash "$TASK_SCRIPT" "$PROJECT_DIR"
     exit 0
 fi
 
@@ -130,9 +140,9 @@ echo "  Node 1 (lighthouse): http://localhost:5052"
 echo "  Node 2 (lodestar):   http://localhost:5053"
 echo "  Node 3 (prysm):      http://localhost:5054"
 echo ""
-echo "Background tasks:"
-echo "  Merge boost:  PID $MERGE_BOOST_PID (starts miners at bellatrix, stops after merge)"
-echo "  Swap daemon:  running in tmux/screen"
+echo "Background tasks (tmux/screen session 'allphase-tasks'):"
+echo "  - Merge boost: starts extra miners at bellatrix, stops after merge"
+echo "  - Swap daemon: swaps old clients at scheduled fork boundaries"
 echo ""
 echo "Monitor progress:"
 echo "  bash scripts/02_swap_clients.sh status"
@@ -140,6 +150,3 @@ echo ""
 echo "Cleanup:"
 echo "  bash scripts/99_cleanup.sh --data"
 echo ""
-
-# Wait for merge boost to finish (non-blocking for user)
-wait "$MERGE_BOOST_PID" 2>/dev/null || true
