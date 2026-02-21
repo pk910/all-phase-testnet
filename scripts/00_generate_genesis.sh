@@ -50,12 +50,20 @@ if [ -z "$TTD" ] || [ "$TTD" = "null" ]; then
     MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 1))
     # Total mining time from EL start = genesis_delay + merge_target in seconds
     TOTAL_MINING_SECONDS=$((GENESIS_DELAY + MERGE_TARGET_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
-    # Conservative estimate: 1 block per 2 seconds (with 2+ miners)
-    ESTIMATED_BLOCKS=$((TOTAL_MINING_SECONDS / 2))
+    # Two phases of mining:
+    #   Pre-bellatrix: 2 miners (node1 geth + node3 besu), ~14s avg block time
+    #   Post-bellatrix: 4 miners (+ 2 extra), ~7s avg block time
+    BELLATRIX_SECONDS=$((GENESIS_DELAY + BELLATRIX_FORK_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
+    POST_BELLATRIX_SECONDS=$((TOTAL_MINING_SECONDS - BELLATRIX_SECONDS))
+    BLOCKS_PRE=$((BELLATRIX_SECONDS / 14))
+    BLOCKS_POST=$((POST_BELLATRIX_SECONDS / 7))
+    ESTIMATED_BLOCKS=$((BLOCKS_PRE + BLOCKS_POST))
     # Use genesis difficulty as average (difficulty adjusts up from here)
     GENESIS_DIFF_DEC=$(printf "%d" "$GENESIS_DIFFICULTY")
     TTD=$((ESTIMATED_BLOCKS * GENESIS_DIFF_DEC))
-    log "Auto-calculated TTD: $TTD (target merge at ~epoch $MERGE_TARGET_EPOCH, ${TOTAL_MINING_SECONDS}s mining, ~$ESTIMATED_BLOCKS blocks × $GENESIS_DIFF_DEC avg difficulty)"
+    log "Auto-calculated TTD: $TTD (target merge at ~epoch $MERGE_TARGET_EPOCH)"
+    log "  Mining: ${BELLATRIX_SECONDS}s pre-bellatrix (~$BLOCKS_PRE blocks@14s) + ${POST_BELLATRIX_SECONDS}s post (~$BLOCKS_POST blocks@7s)"
+    log "  Total ~$ESTIMATED_BLOCKS blocks × $GENESIS_DIFF_DEC avg difficulty"
 else
     log "Using manual TTD: $TTD"
 fi
