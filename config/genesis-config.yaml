@@ -1,0 +1,60 @@
+# All-Phase Testnet Master Configuration
+
+# Chain identity
+chain_id: 1337
+deposit_contract_address: "0x00000000219ab540356cBB839Cbe05303d7705Fa"
+network_name: "allphase-testnet"
+
+# Timing
+# genesis_timestamp: 0              # optional: fixed unix timestamp; if omitted, uses current time
+genesis_delay: 120                   # seconds after genesis generation before chain starts
+seconds_per_slot: 12
+slots_per_epoch: 32
+
+# Fork schedule (CL epochs)
+altair_fork_epoch: 10
+bellatrix_fork_epoch: 20
+capella_fork_epoch: 40
+deneb_fork_epoch: 60
+electra_fork_epoch: 80
+fulu_fork_epoch: 100
+
+# PoW / Merge
+genesis_difficulty: "0x100000"
+# terminal_total_difficulty: 820000  # optional: manual override; if omitted, auto-calculated
+
+# Validators (per node)
+validators_per_node: 128
+validator_mnemonic: "test test test test test test test test test test test junk"
+
+# Pre-funded accounts
+prefund_mnemonic: "test test test test test test test test test test test junk"
+prefund_count: 10
+prefund_balance: "10000000000000000000000"  # 10000 ETH each
+
+# Gas
+genesis_gaslimit: 30000000
+
+# EL Client images
+el_image_old_geth: "ethereum/client-go:v1.11.6"
+el_image_old_besu: "hyperledger/besu:24.10.0"
+el_image_new_geth: "ethereum/client-go:latest"
+el_image_new_besu: "hyperledger/besu:latest"
+el_image_nethermind: "nethermind/nethermind:latest"
+
+# CL Client images
+cl_image_lighthouse: "sigp/lighthouse:latest"
+cl_image_teku: "consensys/teku:latest"
+cl_image_prysm_beacon: "gcr.io/prysmaticlabs/prysm/beacon-chain:latest"
+cl_image_prysm_validator: "gcr.io/prysmaticlabs/prysm/validator:latest"
+
+# Explorer
+dora_image: "ethpandaops/dora:latest"
+
+# Spammer
+spamoor_image: "ethpandaops/spamoor:latest"
+
+# Blockscout
+blockscout_image: "ghcr.io/blockscout/blockscout:latest"
+blockscout_frontend_image: "ghcr.io/blockscout/frontend:latest"
+blockscout_verif_image: "ghcr.io/blockscout/smart-contract-verifier:latest"

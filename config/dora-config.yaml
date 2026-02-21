@@ -1,0 +1,44 @@
+logging:
+  outputLevel: "info"
+
+chain:
+  displayName: "All-Phase Testnet"
+
+server:
+  host: "0.0.0.0"
+  port: "8080"
+
+frontend:
+  enabled: true
+  debug: false
+  minimize: false
+  siteName: "Dora the Explorer"
+  siteSubtitle: "All-Phase Testnet"
+
+beaconapi:
+  endpoints:
+    - url: "http://allphase-node1-cl:5052"
+      name: "Lighthouse"
+    - url: "http://allphase-node2-cl:5051"
+      name: "Teku"
+    - url: "http://allphase-node3-cl:3500"
+      name: "Prysm"
+
+executionapi:
+  endpoints:
+    - url: "http://allphase-node1-el:8545"
+      name: "Geth"
+    - url: "http://allphase-node2-el:8545"
+      name: "Nethermind"
+    - url: "http://allphase-node3-el:8545"
+      name: "Besu"
+  depositLogBatchSize: 1000
+
+indexer:
+  inMemoryEpochs: 8
+  disableSynchronizer: false
+
+database:
+  engine: "sqlite"
+  sqlite:
+    file: "/data/dora.sqlite"
