@@ -43,27 +43,36 @@ source "$PROJECT_DIR/scripts/lib/common.sh"
 
 BELLATRIX_EPOCH=$(read_config "bellatrix_fork_epoch")
 SLOTS_PER_EPOCH=$(read_config "slots_per_epoch")
-EXTRA_MINERS=2
+SECONDS_PER_SLOT=$(read_config "seconds_per_slot")
+MINER_THREADS=4
+# Start miner this many slots before bellatrix (DAG generation + chain sync)
+MINER_LEAD_SLOTS=20
 
 #--- Merge boost (background) ---
 merge_boost() {
     local bellatrix_slot=$((BELLATRIX_EPOCH * SLOTS_PER_EPOCH))
-    log "=== Merge Boost ==="
-    log "  Waiting for bellatrix (epoch $BELLATRIX_EPOCH, slot $bellatrix_slot) to start $EXTRA_MINERS extra miners..."
+    local start_slot=$((bellatrix_slot - MINER_LEAD_SLOTS))
+    if [ "$start_slot" -lt 0 ]; then start_slot=0; fi
 
+    log "=== Merge Boost ==="
+    log "  Will start miner ($MINER_THREADS threads) at slot $start_slot ($MINER_LEAD_SLOTS slots before bellatrix)"
+    log "  Bellatrix: epoch $BELLATRIX_EPOCH (slot $bellatrix_slot)"
+
+    # Wait for the lead-time slot
     while true; do
         local slot
         slot=$(curl -s --max-time 3 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
-        if [ -n "$slot" ] && [ "$slot" != "null" ] && [ "$slot" -ge "$bellatrix_slot" ]; then
-            log "  Bellatrix active (slot $slot). Starting extra miners..."
+        if [ -n "$slot" ] && [ "$slot" != "null" ] && [ "$slot" -ge "$start_slot" ]; then
+            log "  Slot $slot reached (bellatrix in $((bellatrix_slot - slot)) slots). Starting miner..."
             break
         fi
-        sleep 6
+        sleep "$SECONDS_PER_SLOT"
     done
 
-    bash "$PROJECT_DIR/scripts/03_extra_miner.sh" start "$EXTRA_MINERS"
+    bash "$PROJECT_DIR/scripts/03_extra_miner.sh" start "$MINER_THREADS"
 
-    log "  Miners running. Waiting for merge (difficulty=0)..."
+    # Wait for merge (block difficulty drops to 0)
+    log "  Miner running. Waiting for merge (difficulty=0)..."
     while true; do
         local difficulty
         difficulty=$(curl -s --max-time 3 -X POST "http://${NODE1_EL_IP}:8545" \
@@ -71,13 +80,13 @@ merge_boost() {
             -d '{"method":"eth_getBlockByNumber","params":["latest",false],"id":1,"jsonrpc":"2.0"}' 2>/dev/null \
             | jq -r '.result.difficulty' 2>/dev/null || echo "")
         if [ "$difficulty" = "0x0" ]; then
-            log "  Merge detected! Stopping extra miners..."
+            log "  Merge detected! Stopping miner..."
             break
         fi
         sleep 6
     done
 
-    bash "$PROJECT_DIR/scripts/03_extra_miner.sh" stop all
+    bash "$PROJECT_DIR/scripts/03_extra_miner.sh" stop
     log "  Merge boost complete."
 }
 
@@ -141,7 +150,7 @@ echo "  Node 2 (lodestar):   http://localhost:5053"
 echo "  Node 3 (prysm):      http://localhost:5054"
 echo ""
 echo "Background tasks (tmux/screen session 'allphase-tasks'):"
-echo "  - Merge boost: starts extra miners at bellatrix, stops after merge"
+echo "  - Merge boost: starts extra miner before bellatrix, stops after merge"
 echo "  - Swap daemon: swaps old clients at scheduled fork boundaries"
 echo ""
 echo "Monitor progress:"

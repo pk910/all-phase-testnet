@@ -5,21 +5,23 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 
 #############################################################################
-# Extra PoW miners — standalone geth instances that connect to node1 and
-# mine blocks to speed up the pre-merge PoW phase.
+# Extra PoW miner — a single standalone geth instance that connects to
+# node1 and mines blocks with configurable thread count to speed up the
+# pre-merge PoW phase.
 #
-# Each miner is a lightweight geth container:
+# The miner is a lightweight geth container:
 #   - Initialized from the same genesis.json
 #   - Peers with node1 via bootnode enode
-#   - Mines with --mine --miner.threads=1
+#   - Mines with configurable --miner.threads
 #   - No CL, no Engine API, no exposed ports (mining-only)
 #   - Automatically stops mining when TTD is reached (merge)
 #
-# Miners are numbered starting from 1 and get IPs 172.30.0.50+N.
+# Should be started a few blocks before bellatrix to allow DAG generation
+# and chain sync before the merge window.
 #############################################################################
 
-MINER_IP_BASE="172.30.0"
-MINER_IP_START=50
+MINER_IP="${MINER_IP_BASE:-172.30.0}.50"
+MINER_NAME="${CONTAINER_PREFIX}-miner"
 
 #############################################################################
 # Usage
@@ -28,20 +30,19 @@ usage() {
     cat <<EOF
 Usage: $0 <command> [args]
 
-Manages extra PoW miners to speed up block production before the merge.
-Miners are standalone geth instances that peer with node1.
+Manages an extra PoW miner to speed up block production before the merge.
+The miner is a standalone geth instance that peers with node1.
 
 Commands:
-  start [N]         Start N new extra miners (default: 1)
-  stop [id|all]     Stop miner by id, or all miners
-  status            Show running miners
+  start [threads]   Start the extra miner (default: 4 threads)
+  stop              Stop the miner
+  status            Show miner status
 
 Examples:
-  $0 start          # start 1 extra miner
-  $0 start 3        # start 3 extra miners
-  $0 stop all       # stop all extra miners
-  $0 stop 2         # stop miner #2
-  $0 status         # show running miners
+  $0 start          # start miner with 4 threads
+  $0 start 8        # start miner with 8 threads
+  $0 stop           # stop the miner
+  $0 status         # show miner status
 
 Options:
   -h|--help  Show this help
@@ -59,50 +60,43 @@ load_config() {
 }
 
 #############################################################################
-# Helpers
-#############################################################################
-
-# Find the next available miner ID
-next_miner_id() {
-    local max=0
-    for name in $(docker ps -a --filter "name=^${CONTAINER_PREFIX}-miner-" --format '{{.Names}}' 2>/dev/null); do
-        local id="${name##*-miner-}"
-        if [ "$id" -gt "$max" ] 2>/dev/null; then
-            max=$id
-        fi
-    done
-    echo $((max + 1))
-}
-
-# List running miner container names
-list_miners() {
-    docker ps --filter "name=^${CONTAINER_PREFIX}-miner-" --format '{{.Names}}' 2>/dev/null | sort
-}
-
-# List all miner containers (including stopped)
-list_all_miners() {
-    docker ps -a --filter "name=^${CONTAINER_PREFIX}-miner-" --format '{{.Names}}' 2>/dev/null | sort
-}
-
-#############################################################################
 # Start miner
 #############################################################################
-start_miner() {
-    local id="$1"
-    local ip="${MINER_IP_BASE}.$((MINER_IP_START + id))"
-    local name="${CONTAINER_PREFIX}-miner-${id}"
-    local datadir="$DATA_DIR/miner-${id}/el"
+cmd_start() {
+    local threads="${1:-4}"
+
+    if ! [[ "$threads" =~ ^[0-9]+$ ]] || [ "$threads" -lt 1 ]; then
+        log_error "Invalid thread count: $threads"
+        exit 1
+    fi
+
+    # Ensure node1 is running
+    local node1_running
+    node1_running=$(docker ps --filter "name=^${CONTAINER_PREFIX}-node1-el$" --format '{{.Names}}' 2>/dev/null || echo "")
+    if [ -z "$node1_running" ]; then
+        log_error "Node1 EL is not running. Start the network first (01_start_network.sh)."
+        exit 1
+    fi
+
+    log "=== Starting extra miner ($threads threads) ==="
+
+    ensure_network
+
+    # Stop if already running
+    docker stop -t 10 "$MINER_NAME" >/dev/null 2>&1 || true
+    docker rm -f "$MINER_NAME" >/dev/null 2>&1 || true
 
     # Clean & prepare datadir
-    docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf "/hostdata/miner-${id}" 2>/dev/null || true
+    local datadir="$DATA_DIR/miner/el"
+    docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf /hostdata/miner 2>/dev/null || true
     mkdir -p "$datadir"
 
-    # Stop if already exists
-    docker stop -t 10 "$name" >/dev/null 2>&1 || true
-    docker rm -f "$name" >/dev/null 2>&1 || true
+    # Pull image
+    log "  Pulling $EL_IMAGE_GETH..."
+    docker pull "$EL_IMAGE_GETH" -q 2>/dev/null || log "  Warning: could not pull image"
 
     # Init geth datadir
-    log "  Initializing miner $id datadir..."
+    log "  Initializing miner datadir..."
     docker run --rm \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
@@ -120,16 +114,16 @@ start_miner() {
         log "  Warning: could not get node1 enode -- miner may not find peers"
     fi
 
-    # Start miner (mining-only: no RPC, no Engine API, no exposed ports)
-    docker run -d --name "$name" \
-        --network "$DOCKER_NETWORK" --ip "$ip" \
+    # Start miner
+    docker run -d --name "$MINER_NAME" \
+        --network "$DOCKER_NETWORK" --ip "$MINER_IP" \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$datadir:/data" \
         "$EL_IMAGE_GETH" \
         --datadir /data \
         --networkid "$CHAIN_ID" \
-        --mine --miner.threads=1 \
+        --mine --miner.threads="$threads" \
         --miner.etherbase="$ETHERBASE" \
         --miner.gasprice=1 \
         --port=30303 \
@@ -137,124 +131,40 @@ start_miner() {
         --syncmode=full \
         $bootnodes
 
-    log "  Started miner $id: $name (IP: $ip)"
+    log "  Started miner: $MINER_NAME (IP: $MINER_IP, threads: $threads)"
+    log "  Mining stops automatically when TTD is reached (merge)."
 }
 
 #############################################################################
-# Stop miner(s)
+# Stop miner
 #############################################################################
-stop_miner() {
-    local name="$1"
-    if docker ps -a --format '{{.Names}}' | grep -q "^${name}$" 2>/dev/null; then
-        log "  Stopping $name..."
-        docker stop -t 10 "$name" >/dev/null 2>&1 || true
-        docker rm -f "$name" >/dev/null 2>&1 || true
-
-        # Clean up datadir
-        local id="${name##*-miner-}"
-        docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf "/hostdata/miner-${id}" 2>/dev/null || true
+cmd_stop() {
+    log "=== Stopping extra miner ==="
+    if docker ps -a --format '{{.Names}}' | grep -q "^${MINER_NAME}$" 2>/dev/null; then
+        log "  Stopping $MINER_NAME..."
+        docker stop -t 10 "$MINER_NAME" >/dev/null 2>&1 || true
+        docker rm -f "$MINER_NAME" >/dev/null 2>&1 || true
+        docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf /hostdata/miner 2>/dev/null || true
+    else
+        log "  No miner running."
     fi
-}
-
-stop_all_miners() {
-    local miners
-    miners=$(list_all_miners)
-    if [ -z "$miners" ]; then
-        log "  No miners running."
-        return 0
-    fi
-    for name in $miners; do
-        stop_miner "$name"
-    done
+    log "=== Done ==="
 }
 
 #############################################################################
 # Status
 #############################################################################
 cmd_status() {
-    log "=== Extra Miners ==="
-    local miners
-    miners=$(list_miners)
-    if [ -z "$miners" ]; then
-        log "  No extra miners running."
-        return 0
-    fi
-
-    local count=0
-    for name in $miners; do
-        local id="${name##*-miner-}"
-        local ip="${MINER_IP_BASE}.$((MINER_IP_START + id))"
-        local uptime
-        uptime=$(docker inspect --format '{{.State.StartedAt}}' "$name" 2>/dev/null || echo "?")
-        local status
-        status=$(docker inspect --format '{{.State.Status}}' "$name" 2>/dev/null || echo "?")
-
-        # Check last log line for mining activity
-        local last_line
-        last_line=$(docker logs --tail 1 "$name" 2>&1 || echo "")
-
-        log "  $name  IP=$ip  status=$status  started=$uptime"
-        count=$((count + 1))
-    done
-    log ""
-    log "  Total: $count extra miner(s)"
-    log "  Image: $EL_IMAGE_GETH"
-}
-
-#############################################################################
-# Commands
-#############################################################################
-cmd_start() {
-    local count="${1:-1}"
-
-    if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" -lt 1 ]; then
-        log_error "Invalid count: $count"
-        exit 1
-    fi
-
-    log "=== Starting $count extra miner(s) ==="
-
-    # Ensure node1 is running
-    local node1_running
-    node1_running=$(docker ps --filter "name=^${CONTAINER_PREFIX}-node1-el$" --format '{{.Names}}' 2>/dev/null || echo "")
-    if [ -z "$node1_running" ]; then
-        log_error "Node1 EL is not running. Start the network first (01_start_network.sh)."
-        exit 1
-    fi
-
-    ensure_network
-
-    log "  Pulling $EL_IMAGE_GETH..."
-    docker pull "$EL_IMAGE_GETH" -q 2>/dev/null || log "  Warning: could not pull image"
-
-    for i in $(seq 1 "$count"); do
-        local id
-        id=$(next_miner_id)
-        start_miner "$id"
-    done
-
-    log ""
-    log "=== $count extra miner(s) started ==="
-    log "  Miners will sync from node1 and begin mining."
-    log "  Mining stops automatically when TTD is reached (merge)."
-}
-
-cmd_stop() {
-    local target="${1:-all}"
-
-    if [ "$target" = "all" ]; then
-        log "=== Stopping all extra miners ==="
-        stop_all_miners
+    log "=== Extra Miner ==="
+    if docker ps --filter "name=^${MINER_NAME}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+        local status uptime
+        status=$(docker inspect --format '{{.State.Status}}' "$MINER_NAME" 2>/dev/null || echo "?")
+        uptime=$(docker inspect --format '{{.State.StartedAt}}' "$MINER_NAME" 2>/dev/null || echo "?")
+        log "  $MINER_NAME  IP=$MINER_IP  status=$status  started=$uptime"
+        log "  Image: $EL_IMAGE_GETH"
     else
-        if ! [[ "$target" =~ ^[0-9]+$ ]]; then
-            log_error "Invalid miner id: $target (use a number or 'all')"
-            exit 1
-        fi
-        local name="${CONTAINER_PREFIX}-miner-${target}"
-        log "=== Stopping miner $target ==="
-        stop_miner "$name"
+        log "  No extra miner running."
     fi
-    log "=== Done ==="
 }
 
 #############################################################################
@@ -284,7 +194,7 @@ shift
 
 case "$COMMAND" in
     start)  cmd_start "$@" ;;
-    stop)   cmd_stop "$@" ;;
+    stop)   cmd_stop ;;
     status) cmd_status ;;
     *)
         log_error "Unknown command: $COMMAND"

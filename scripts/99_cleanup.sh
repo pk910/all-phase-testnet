@@ -32,7 +32,7 @@ screen -X -S allphase-tasks quit 2>/dev/null || true
 screen -X -S allphase-swap quit 2>/dev/null || true
 
 # Stop extra miners if any
-bash "$PROJECT_DIR/scripts/03_extra_miner.sh" stop all 2>/dev/null || true
+bash "$PROJECT_DIR/scripts/03_extra_miner.sh" stop 2>/dev/null || true
 
 # Delegate stop to the main script
 bash "$PROJECT_DIR/scripts/01_start_network.sh" stop
