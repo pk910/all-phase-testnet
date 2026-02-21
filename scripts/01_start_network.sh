@@ -101,6 +101,9 @@ load_config() {
     BLOCKSCOUT_IMAGE=$(read_config "blockscout_image")
     BLOCKSCOUT_FRONTEND_IMAGE=$(read_config "blockscout_frontend_image")
     BLOCKSCOUT_VERIF_IMAGE=$(read_config "blockscout_verif_image")
+
+    # Public IP for external-facing services (default: localhost)
+    PUBLIC_IP=$(read_config_default "public_ip" "localhost")
 }
 
 #############################################################################
@@ -566,7 +569,6 @@ start_blockscout() {
         /bin/sh -c 'bin/blockscout eval "Elixir.Explorer.ReleaseTasks.create_and_migrate()" && bin/blockscout start'
 
     # 4. Frontend
-    # NEXT_PUBLIC_API_HOST uses Docker-internal address (proxy mode routes through Next.js server)
     log "  Starting blockscout frontend..."
     docker run -d --name "${CONTAINER_PREFIX}-blockscout-frontend" \
         --network "$DOCKER_NETWORK" --ip "$BLOCKSCOUT_FRONTEND_IP" \
@@ -575,10 +577,10 @@ start_blockscout() {
         -e PORT=3000 \
         -e NEXT_PUBLIC_API_PROTOCOL=http \
         -e NEXT_PUBLIC_API_WEBSOCKET_PROTOCOL=ws \
-        -e NEXT_PUBLIC_API_HOST="${CONTAINER_PREFIX}-blockscout:4000" \
+        -e NEXT_PUBLIC_API_HOST="${PUBLIC_IP}:4000" \
         -e NEXT_PUBLIC_NETWORK_NAME="All-Phase Testnet" \
         -e NEXT_PUBLIC_NETWORK_ID="$CHAIN_ID" \
-        -e NEXT_PUBLIC_NETWORK_RPC_URL="http://localhost:8545/" \
+        -e NEXT_PUBLIC_NETWORK_RPC_URL="http://${PUBLIC_IP}:8545/" \
         -e NEXT_PUBLIC_IS_TESTNET=true \
         -e NEXT_PUBLIC_NETWORK_CURRENCY_NAME=Ether \
         -e NEXT_PUBLIC_NETWORK_CURRENCY_SYMBOL=ETH \
@@ -589,13 +591,12 @@ start_blockscout() {
         -e NEXT_PUBLIC_HAS_BEACON_CHAIN=true \
         -e NEXT_PUBLIC_NETWORK_VERIFICATION_TYPE=validation \
         -e NEXT_PUBLIC_APP_PROTOCOL=http \
-        -e NEXT_PUBLIC_APP_HOST=127.0.0.1 \
+        -e NEXT_PUBLIC_APP_HOST="${PUBLIC_IP}" \
         -e NEXT_PUBLIC_APP_PORT=3000 \
-        -e NEXT_PUBLIC_USE_NEXT_JS_PROXY=true \
         "$BLOCKSCOUT_FRONTEND_IMAGE"
 
-    log "  Blockscout backend:  ${CONTAINER_PREFIX}-blockscout [http://localhost:4000]"
-    log "  Blockscout frontend: ${CONTAINER_PREFIX}-blockscout-frontend [http://localhost:3000]"
+    log "  Blockscout backend:  ${CONTAINER_PREFIX}-blockscout [http://${PUBLIC_IP}:4000]"
+    log "  Blockscout frontend: ${CONTAINER_PREFIX}-blockscout-frontend [http://${PUBLIC_IP}:3000]"
 }
 
 #############################################################################
