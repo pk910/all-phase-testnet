@@ -102,8 +102,12 @@ load_config() {
     BLOCKSCOUT_FRONTEND_IMAGE=$(read_config "blockscout_frontend_image")
     BLOCKSCOUT_VERIF_IMAGE=$(read_config "blockscout_verif_image")
 
-    # Public IP for external-facing services (default: localhost)
-    PUBLIC_IP=$(read_config_default "public_ip" "localhost")
+    # Public IP for external-facing services (auto-detect or override via config)
+    PUBLIC_IP=$(read_config_default "public_ip" "")
+    if [ -z "$PUBLIC_IP" ]; then
+        PUBLIC_IP=$(curl -s --max-time 3 https://ifconfig.me 2>/dev/null || curl -s --max-time 3 https://api.ipify.org 2>/dev/null || echo "localhost")
+        log "  Auto-detected public IP: $PUBLIC_IP"
+    fi
 }
 
 #############################################################################
@@ -598,6 +602,7 @@ start_blockscout() {
         -e INDEXER_DISABLE_PENDING_TRANSACTIONS_FETCHER=true \
         -e DISABLE_EXCHANGE_RATES=true \
         -e DISABLE_KNOWN_TOKENS=true \
+        -e ALLOWED_ORIGINS="*" \
         "$BLOCKSCOUT_IMAGE" \
         /bin/sh -c 'bin/blockscout eval "Elixir.Explorer.ReleaseTasks.create_and_migrate()" && bin/blockscout start'
 
