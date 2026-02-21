@@ -176,6 +176,7 @@ start_node1() {
         --networkid "$CHAIN_ID" \
         --mine --miner.threads=1 \
         --miner.etherbase="$ETHERBASE" \
+        --miner.gasprice=1 \
         --http --http.addr=0.0.0.0 --http.port=8545 \
         --http.api=eth,net,web3,debug,trace,admin,txpool \
         --http.corsdomain="*" --http.vhosts="*" \
