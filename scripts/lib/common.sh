@@ -124,6 +124,7 @@ stop_component() {
     for c in $containers; do
         if docker ps -a --format '{{.Names}}' | grep -q "^${c}$" 2>/dev/null; then
             log "  Stopping $c"
+            docker stop -t 30 "$c" >/dev/null 2>&1 || true
             docker rm -f "$c" >/dev/null 2>&1 || true
         fi
     done

@@ -429,9 +429,6 @@ start_node2() {
         teku_static_peers="--p2p-static-peers=$teku_static_list"
     fi
 
-    # Clean stale lock files from previous Teku run
-    find "$GENERATED_DIR/keys/node2/teku-keys/" -name "*.lock" -delete 2>/dev/null || true
-
     # Teku beacon + validator (combined)
     log "  Starting teku..."
     docker run -d --name "${CONTAINER_PREFIX}-node2-cl" \
