@@ -740,8 +740,7 @@ swap_node3_el() {
         --engine-jwt-secret=/jwt \
         --p2p-port=30303 \
         --sync-mode=FULL \
-        --min-gas-price=0 \
-        --Xbonsai-parallel-tx-processing-enabled=false
+        --min-gas-price=0
 
     wait_for_el "$NODE3_EL_IP" "node3"
     check_el_peers "$NODE3_EL_IP" "node3"
