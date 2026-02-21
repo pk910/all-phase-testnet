@@ -52,13 +52,21 @@ log_error() {
 }
 
 # Read a YAML value using python (most reliable)
+# Merges genesis-config.yaml with genesis-config.local.yaml overrides
 read_config() {
     local key="$1"
     local file="${2:-$CONFIG_DIR/genesis-config.yaml}"
+    local local_file="${file%.yaml}.local.yaml"
     python3 -c "
 import yaml, sys
 with open('$file') as f:
-    d = yaml.safe_load(f)
+    d = yaml.safe_load(f) or {}
+try:
+    with open('$local_file') as f:
+        local_d = yaml.safe_load(f) or {}
+    d.update(local_d)
+except FileNotFoundError:
+    pass
 keys = '$key'.split('.')
 v = d
 for k in keys:

@@ -91,41 +91,29 @@ GENESIS_DIFFICULTY_HEX="$GENESIS_DIFFICULTY"
 GENESIS_GASLIMIT_HEX="0x$(printf "%x" "$GENESIS_GASLIMIT")"
 GENESIS_TIMESTAMP_HEX="0x$(printf "%x" "$GENESIS_TIMESTAMP")"
 
-# Read deposit contract bytecode from system-contracts
-DEPOSIT_CODE=$(python3 -c "
-import yaml
-with open('$PROJECT_DIR/data/deposit_contract.yaml') as f:
-    d = yaml.safe_load(f)
-print(d['code'])
-" 2>/dev/null || echo "")
+# Extract deposit contract from ethereum-genesis-generator docker image
+log "  Extracting deposit contract from ethereum-genesis-generator image..."
+TMPFILE=$(mktemp)
+trap "rm -f $TMPFILE" EXIT
+docker run --rm --entrypoint "" \
+    "ethpandaops/ethereum-genesis-generator:master" \
+    cat /apps/el-gen/system-contracts.yaml > "$TMPFILE" 2>/dev/null
 
-# If no local file, use the one from ethereum-genesis-generator
-if [ -z "$DEPOSIT_CODE" ]; then
-    DEPOSIT_CONTRACT_FILE="/home/pk910/github/ethpandaops/ethereum-genesis-generator/apps/el-gen/system-contracts.yaml"
-    if [ -f "$DEPOSIT_CONTRACT_FILE" ]; then
-        # Extract deposit contract code and storage from yaml-like format
-        # The file uses a custom format, so we parse it with a Python helper
-        DEPOSIT_ALLOC=$(python3 << 'PYEOF'
+if [ ! -s "$TMPFILE" ]; then
+    log_error "Could not extract system-contracts.yaml from docker image"
+    exit 1
+fi
+
+DEPOSIT_ALLOC=$(python3 -c "
 import json, re, sys
-
-contracts_file = "/home/pk910/github/ethpandaops/ethereum-genesis-generator/apps/el-gen/system-contracts.yaml"
-with open(contracts_file) as f:
+with open('$TMPFILE') as f:
     content = f.read()
-
-# Extract the deposit contract JSON block
-# Find "deposit: {" and extract until the matching closing "}"
 match = re.search(r'deposit:\s*(\{.*?\n\})', content, re.DOTALL)
 if match:
-    json_str = match.group(1)
-    obj = json.loads(json_str)
-    print(json.dumps(obj))
+    print(json.dumps(json.loads(match.group(1))))
 else:
-    print('{}', file=sys.stderr)
     sys.exit(1)
-PYEOF
-        )
-    fi
-fi
+")
 
 if [ -z "$DEPOSIT_ALLOC" ]; then
     log_error "Could not load deposit contract bytecode"
