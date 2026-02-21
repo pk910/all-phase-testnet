@@ -25,6 +25,12 @@ DENEB_FORK_EPOCH=$(read_config "deneb_fork_epoch")
 ELECTRA_FORK_EPOCH=$(read_config "electra_fork_epoch")
 FULU_FORK_EPOCH=$(read_config "fulu_fork_epoch")
 
+# BPO (Blob Parameter Override) schedule
+BPO1_FORK_EPOCH=$(read_config_default "bpo1_fork_epoch" "")
+BPO1_MAX_BLOBS=$(read_config_default "bpo1_max_blobs" "15")
+BPO2_FORK_EPOCH=$(read_config_default "bpo2_fork_epoch" "")
+BPO2_MAX_BLOBS=$(read_config_default "bpo2_max_blobs" "30")
+
 # Genesis timestamp
 GENESIS_TIMESTAMP=$(read_config "genesis_timestamp")
 if [ -z "$GENESIS_TIMESTAMP" ] || [ "$GENESIS_TIMESTAMP" = "null" ]; then
@@ -65,11 +71,27 @@ CANCUN_TIME=$(calc_fork_timestamp "$DENEB_FORK_EPOCH")
 PRAGUE_TIME=$(calc_fork_timestamp "$ELECTRA_FORK_EPOCH")
 OSAKA_TIME=$(calc_fork_timestamp "$FULU_FORK_EPOCH")
 
+# BPO timestamps (only if configured)
+BPO1_TIME=0
+BPO2_TIME=0
+if [ -n "$BPO1_FORK_EPOCH" ]; then
+    BPO1_TIME=$(calc_fork_timestamp "$BPO1_FORK_EPOCH")
+fi
+if [ -n "$BPO2_FORK_EPOCH" ]; then
+    BPO2_TIME=$(calc_fork_timestamp "$BPO2_FORK_EPOCH")
+fi
+
 log "Fork timestamps:"
 log "  Shanghai/Capella: $SHANGHAI_TIME (epoch $CAPELLA_FORK_EPOCH)"
 log "  Cancun/Deneb:     $CANCUN_TIME (epoch $DENEB_FORK_EPOCH)"
 log "  Prague/Electra:   $PRAGUE_TIME (epoch $ELECTRA_FORK_EPOCH)"
 log "  Osaka/Fulu:       $OSAKA_TIME (epoch $FULU_FORK_EPOCH)"
+if [ "$BPO1_TIME" -gt 0 ]; then
+    log "  BPO1:             $BPO1_TIME (epoch $BPO1_FORK_EPOCH)"
+fi
+if [ "$BPO2_TIME" -gt 0 ]; then
+    log "  BPO2:             $BPO2_TIME (epoch $BPO2_FORK_EPOCH)"
+fi
 
 DOCKER_UID="$(id -u):$(id -g)"
 
@@ -158,7 +180,11 @@ PYEOF
 # Generate geth genesis.json
 log "  Generating genesis.json (geth format)..."
 python3 << PYEOF
-import json
+import json, math
+
+def calc_base_fee_update_fraction(max_blobs):
+    GAS_PER_BLOB = 2**17  # 131072
+    return round((max_blobs * GAS_PER_BLOB) / (2 * math.log(1.125)))
 
 genesis = {
     "config": {
@@ -178,6 +204,11 @@ genesis = {
         "cancunTime": $CANCUN_TIME,
         "pragueTime": $PRAGUE_TIME,
         "osakaTime": $OSAKA_TIME,
+        "blobSchedule": {
+            "cancun": {"target": 3, "max": 6, "baseFeeUpdateFraction": calc_base_fee_update_fraction(6)},
+            "prague": {"target": 6, "max": 9, "baseFeeUpdateFraction": calc_base_fee_update_fraction(9)},
+            "osaka": {"target": 6, "max": 9, "baseFeeUpdateFraction": calc_base_fee_update_fraction(9)},
+        },
         "depositContractAddress": "$DEPOSIT_CONTRACT"
     },
     "alloc": {},
@@ -204,6 +235,24 @@ genesis["alloc"]["$DEPOSIT_CONTRACT"] = deposit
 # Add prefunded accounts
 prefund = json.loads('$PREFUND_ALLOC')
 genesis["alloc"].update(prefund)
+
+# Add BPO blob schedule entries
+if $BPO1_TIME > 0:
+    genesis["config"]["bpo1Time"] = $BPO1_TIME
+    bpo1_max = $BPO1_MAX_BLOBS
+    genesis["config"]["blobSchedule"]["bpo1"] = {
+        "target": (bpo1_max + 1) // 2,
+        "max": bpo1_max,
+        "baseFeeUpdateFraction": calc_base_fee_update_fraction(bpo1_max)
+    }
+if $BPO2_TIME > 0:
+    genesis["config"]["bpo2Time"] = $BPO2_TIME
+    bpo2_max = $BPO2_MAX_BLOBS
+    genesis["config"]["blobSchedule"]["bpo2"] = {
+        "target": (bpo2_max + 1) // 2,
+        "max": bpo2_max,
+        "baseFeeUpdateFraction": calc_base_fee_update_fraction(bpo2_max)
+    }
 
 with open("$GENERATED_DIR/el/genesis.json", "w") as f:
     json.dump(genesis, f, indent=2)
@@ -242,6 +291,8 @@ SHANGHAI_TIME_HEX="0x$(printf "%x" "$SHANGHAI_TIME")"
 CANCUN_TIME_HEX="0x$(printf "%x" "$CANCUN_TIME")"
 PRAGUE_TIME_HEX="0x$(printf "%x" "$PRAGUE_TIME")"
 OSAKA_TIME_HEX="0x$(printf "%x" "$OSAKA_TIME")"
+BPO1_TIME_HEX="0x$(printf "%x" "$BPO1_TIME")"
+BPO2_TIME_HEX="0x$(printf "%x" "$BPO2_TIME")"
 
 # Generate nethermind chainspec (Parity/OpenEthereum format)
 # Following the same approach as ethereum-genesis-generator: template + jq patches
@@ -324,6 +375,7 @@ chainspec = {
         "eip7251TransitionTimestamp": "$PRAGUE_TIME_HEX",
         "eip7623TransitionTimestamp": "$PRAGUE_TIME_HEX",
         "eip7702TransitionTimestamp": "$PRAGUE_TIME_HEX",
+        "eip7594TransitionTimestamp": "$OSAKA_TIME_HEX",
     },
     "genesis": {
         "seal": {
@@ -343,6 +395,40 @@ chainspec = {
     "accounts": {},
     "nodes": []
 }
+
+# Add blobSchedule to params (nethermind uses array format with hex values)
+import math
+
+def calc_base_fee_update_fraction(max_blobs):
+    GAS_PER_BLOB = 2**17
+    return round((max_blobs * GAS_PER_BLOB) / (2 * math.log(1.125)))
+
+blob_schedule = [
+    {"timestamp": "$CANCUN_TIME_HEX", "target": 3, "max": 6, "baseFeeUpdateFraction": hex(calc_base_fee_update_fraction(6))},
+    {"timestamp": "$PRAGUE_TIME_HEX", "target": 6, "max": 9, "baseFeeUpdateFraction": hex(calc_base_fee_update_fraction(9))},
+    {"timestamp": "$OSAKA_TIME_HEX", "target": 6, "max": 9, "baseFeeUpdateFraction": hex(calc_base_fee_update_fraction(9))},
+]
+
+bpo1_time = $BPO1_TIME
+bpo2_time = $BPO2_TIME
+if bpo1_time > 0:
+    bpo1_max = $BPO1_MAX_BLOBS
+    blob_schedule.append({
+        "timestamp": hex(bpo1_time),
+        "target": (bpo1_max + 1) // 2,
+        "max": bpo1_max,
+        "baseFeeUpdateFraction": hex(calc_base_fee_update_fraction(bpo1_max))
+    })
+if bpo2_time > 0:
+    bpo2_max = $BPO2_MAX_BLOBS
+    blob_schedule.append({
+        "timestamp": hex(bpo2_time),
+        "target": (bpo2_max + 1) // 2,
+        "max": bpo2_max,
+        "baseFeeUpdateFraction": hex(calc_base_fee_update_fraction(bpo2_max))
+    })
+
+chainspec["params"]["blobSchedule"] = blob_schedule
 
 # Copy alloc from geth genesis into accounts
 for addr, data in geth_genesis.get("alloc", {}).items():
@@ -468,6 +554,24 @@ VALIDATOR_CUSTODY_REQUIREMENT: 8
 BALANCE_PER_ADDITIONAL_CUSTODY_GROUP: 32000000000
 MIN_EPOCHS_FOR_DATA_COLUMN_SIDECARS_REQUESTS: 4096
 EOF
+
+# Append BLOB_SCHEDULE if BPO epochs are configured
+if [ -n "$BPO1_FORK_EPOCH" ] || [ -n "$BPO2_FORK_EPOCH" ]; then
+    log "  Adding BLOB_SCHEDULE (BPO forks)..."
+    echo "" >> "$GENERATED_DIR/cl/config.yaml"
+    echo "# Blob Parameter Override schedule" >> "$GENERATED_DIR/cl/config.yaml"
+    echo "BLOB_SCHEDULE:" >> "$GENERATED_DIR/cl/config.yaml"
+    if [ -n "$BPO1_FORK_EPOCH" ]; then
+        echo "  - EPOCH: $BPO1_FORK_EPOCH" >> "$GENERATED_DIR/cl/config.yaml"
+        echo "    MAX_BLOBS_PER_BLOCK: $BPO1_MAX_BLOBS" >> "$GENERATED_DIR/cl/config.yaml"
+        log "    BPO1: epoch $BPO1_FORK_EPOCH, max_blobs=$BPO1_MAX_BLOBS"
+    fi
+    if [ -n "$BPO2_FORK_EPOCH" ]; then
+        echo "  - EPOCH: $BPO2_FORK_EPOCH" >> "$GENERATED_DIR/cl/config.yaml"
+        echo "    MAX_BLOBS_PER_BLOCK: $BPO2_MAX_BLOBS" >> "$GENERATED_DIR/cl/config.yaml"
+        log "    BPO2: epoch $BPO2_FORK_EPOCH, max_blobs=$BPO2_MAX_BLOBS"
+    fi
+fi
 
 log "  -> $GENERATED_DIR/cl/config.yaml"
 

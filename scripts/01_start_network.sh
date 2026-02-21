@@ -93,7 +93,7 @@ load_config() {
     EL_IMAGE_BESU=$(read_config "el_image_old_besu")
     CL_IMAGE_OLD_LIGHTHOUSE=$(read_config "cl_image_old_lighthouse")
     CL_IMAGE_LIGHTHOUSE=$(read_config "cl_image_lighthouse")
-    CL_IMAGE_LODESTAR=$(read_config "cl_image_lodestar")
+    CL_IMAGE_LODESTAR=$(read_config "cl_image_old_lodestar")
     CL_IMAGE_PRYSM_BEACON=$(read_config "cl_image_prysm_beacon")
     CL_IMAGE_PRYSM_VALIDATOR=$(read_config "cl_image_prysm_validator")
     DORA_IMAGE=$(read_config "dora_image")

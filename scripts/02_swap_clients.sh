@@ -18,32 +18,37 @@ source "$SCRIPT_DIR/lib/common.sh"
 #   lighthouse latest  Phase0: BUG  Altair: BUG  Bellatrix: BUG  Capella: BUG  Deneb: BUG  Electra: YES  Fulu: YES
 #     NOTE: lighthouse latest has a pre-Electra attestation format bug — it cannot operate correctly
 #           before the Electra fork. This constrains the CL swap to happen AT the Electra boundary.
-#   lodestar latest    All forks supported (no swap needed)
+#   lodestar v1.38.0   Phase0: YES  Altair: YES  Bellatrix: YES  Capella: YES  Deneb: YES  Electra: NO   Fulu: NO
+#   lodestar latest    Phase0: NO   Altair: NO   Bellatrix: NO   Capella: NO   Deneb: NO   Electra: YES  Fulu: YES
+#     NOTE: lodestar latest dropped pre-Electra block production — cannot produce
+#           blocks before Electra. Same constraint as lighthouse: swap AT Electra.
 #   prysm latest       All forks supported (no swap needed)
 #
 # Node configuration:
 #   node1: geth v1.11.6 + lighthouse v5.3.0    → needs EL swap before Deneb, CL swap at Electra
-#   node2: geth v1.11.6 + lodestar latest      → needs EL swap before Deneb (CL no swap needed)
+#   node2: geth v1.11.6 + lodestar v1.38.0     → needs EL swap before Deneb, CL swap at Electra
 #   node3: besu 24.10.0 + prysm latest          → needs EL swap before Electra
 #
 # Required Swap Timing:
 #   node1-el  geth v1.11.6 -> latest       BEFORE Deneb    (no Engine API V3 / no Cancun support)
 #   node2-el  geth v1.11.6 -> latest       BEFORE Deneb    (same as node1-el)
 #   node3-el  besu 24.10.0 -> latest        BEFORE Electra  (only experimental Prague Engine API V4)
+#   node2-cl  lodestar v1.38.0 -> latest    AT Electra      (v1.38 no Electra, latest no pre-Electra)
 #   node1-cl  lighthouse v5.3.0 -> latest   AT Electra      (v5.3.0 breaks at Electra, latest breaks before it)
 #
 # Swap Windows (derived from fork schedule):
 #   node1-el: [Capella .. Deneb)        swap geth after Shanghai works, before Cancun needed
 #   node2-el: [Capella .. Deneb)        swap geth after Shanghai works, before Cancun needed
 #   node3-el: [Deneb .. Electra)        swap besu after Deneb works, before Prague needed
-#   node1-cl: AT Electra boundary       lighthouse latest has pre-Electra attestation bug,
-#                                        v5.3.0 has no Electra support — must swap right at the fork
+#   node2-cl: AT Electra boundary       lodestar latest dropped pre-Electra block production
+#   node1-cl: AT Electra boundary       lighthouse latest has pre-Electra attestation bug
 #
 # Default daemon schedule (staggered):
 #   node1-el: first third of [Capella, Deneb)
 #   node2-el: second third of [Capella, Deneb)
 #   node3-el: midpoint of [Deneb, Electra)
-#   node1-cl: ~8 slots before Electra epoch (slot-precise)
+#   node2-cl: ~10 slots before Electra (slot-precise)
+#   node1-cl: ~10 slots before Electra (slot-precise, after node2-cl)
 #############################################################################
 
 #############################################################################
@@ -65,16 +70,16 @@ Swap targets:
   node1-el   Swap node1 EL: geth v1.11.6 -> latest        (before Deneb)
   node2-el   Swap node2 EL: geth v1.11.6 -> latest        (before Deneb)
   node3-el   Swap node3 EL: besu 24.10.0 -> latest         (before Electra)
+  node2-cl   Swap node2 CL: lodestar v1.38.0 -> latest     (AT Electra boundary)
   node1-cl   Swap node1 CL: lighthouse v5.3.0 -> latest    (AT Electra boundary)
   node1      Swap all node1 components (node1-el + node1-cl)
-  node2      Alias for node2-el
+  node2      Swap all node2 components (node2-el + node2-cl)
   node3      Alias for node3-el
   all        Swap all swappable components in order
 
-Note: node2 CL (lodestar latest) needs no swap — it supports all forks.
-Lighthouse latest has a pre-Electra attestation format bug, so the CL swap
-must happen right at the Electra fork boundary. The daemon handles this
-with slot-level precision.
+Note: Both CL swaps happen at the Electra boundary. Lighthouse latest has a
+pre-Electra attestation bug; Lodestar latest dropped pre-Electra block
+production. The daemon handles timing with slot-level precision.
 
 Examples:
   $0 swap node1-el           # swap only node1 EL (geth)
@@ -100,6 +105,7 @@ load_config() {
     EL_IMAGE_NEW_GETH=$(read_config "el_image_new_geth")
     EL_IMAGE_NEW_BESU=$(read_config "el_image_new_besu")
     CL_IMAGE_LIGHTHOUSE=$(read_config "cl_image_lighthouse")
+    CL_IMAGE_LODESTAR=$(read_config "cl_image_lodestar")
 
     CAPELLA_EPOCH=$(read_config "capella_fork_epoch")
     DENEB_EPOCH=$(read_config "deneb_fork_epoch")
@@ -119,20 +125,23 @@ load_config() {
     #   node3-el: midpoint of [Deneb, Electra)
     SWAP_NODE3_EL_EPOCH=$(( DENEB_EPOCH + (ELECTRA_EPOCH - DENEB_EPOCH) / 2 ))
     if [ "$SWAP_NODE3_EL_EPOCH" -lt "$DENEB_EPOCH" ]; then SWAP_NODE3_EL_EPOCH=$DENEB_EPOCH; fi
-    #   node1-cl: AT the Electra boundary (slot-precise in daemon mode)
-    #     lighthouse latest has pre-Electra attestation format bug, so we swap
-    #     as late as possible — stop old lighthouse ~2 min before Electra so
-    #     new lighthouse starts up right at the fork.
+    #   node1-cl + node2-cl: AT the Electra boundary (slot-precise in daemon mode)
+    #     lighthouse latest has pre-Electra attestation format bug
+    #     lodestar latest dropped pre-Electra block production
+    #     Both must swap right at the Electra fork boundary.
     SWAP_NODE1_CL_EPOCH=$ELECTRA_EPOCH
+    SWAP_NODE2_CL_EPOCH=$ELECTRA_EPOCH
     ELECTRA_FIRST_SLOT=$(( ELECTRA_EPOCH * SLOTS_PER_EPOCH ))
-    # Trigger the CL swap this many slots before Electra (gives startup time)
-    SWAP_NODE1_CL_LEAD_SLOTS=8
+    # Trigger CL swaps this many slots before Electra (gives startup time)
+    SWAP_NODE1_CL_LEAD_SLOTS=10
+    SWAP_NODE2_CL_LEAD_SLOTS=10
 }
 
 # All swap target names in execution order
-# node1-cl is LAST because it must happen at the Electra boundary,
+# CL swaps are LAST because they must happen at the Electra boundary,
 # which is after node3-el (which also needs to complete before Electra).
-ALL_SWAP_TARGETS="node1-el node2-el node3-el node1-cl"
+# node2-cl swaps first (lodestar is fast), then node1-cl (lighthouse).
+ALL_SWAP_TARGETS="node1-el node2-el node3-el node2-cl node1-cl"
 
 #############################################################################
 # Swap state tracking (marker files)
@@ -155,6 +164,7 @@ pull_swap_images() {
         case "$t" in
             node1-el|node2-el) images+=("$EL_IMAGE_NEW_GETH") ;;
             node1-cl) images+=("$CL_IMAGE_LIGHTHOUSE") ;;
+            node2-cl) images+=("$CL_IMAGE_LODESTAR") ;;
             node3-el) images+=("$EL_IMAGE_NEW_BESU") ;;
         esac
     done
@@ -407,14 +417,110 @@ swap_node2_el() {
     log "  Node 2 EL swap complete."
 }
 
+# Node2 CL: lodestar v1.38.0 -> latest
+# Stops beacon + VC, starts new versions. Geth EL stays running.
+# TIMING: Must happen right at the Electra fork boundary because:
+#   - lodestar v1.38.0 does not support Electra/Fulu
+#   - lodestar latest dropped pre-Electra block production support
+swap_node2_cl() {
+    if is_swapped "node2-cl"; then
+        log "  node2-cl already swapped -- skipping."
+        return 0
+    fi
+
+    log ""
+    log "=== Swapping Node 2 CL: lodestar old -> new (at Electra boundary) ==="
+    log "  Geth EL stays running -- only CL + VC swap."
+
+    # Stop VC first
+    log "  Stopping lodestar validator..."
+    docker stop -t 30 "${CONTAINER_PREFIX}-node2-vc" >/dev/null 2>&1 || true
+    docker rm -f "${CONTAINER_PREFIX}-node2-vc" >/dev/null 2>&1 || true
+
+    # Stop CL
+    log "  Stopping lodestar beacon..."
+    docker stop -t 30 "${CONTAINER_PREFIX}-node2-cl" >/dev/null 2>&1 || true
+    docker rm -f "${CONTAINER_PREFIX}-node2-cl" >/dev/null 2>&1 || true
+
+    # Get CL ENRs for bootnodes
+    local node1_cl_enr node3_cl_enr bootnode_args=""
+    node1_cl_enr=$(curl -s "http://${NODE1_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    node3_cl_enr=$(curl -s "http://${NODE3_CL_IP}:3500/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+
+    if [ -n "$node1_cl_enr" ] && [ "$node1_cl_enr" != "null" ]; then
+        bootnode_args="--bootnodes=$node1_cl_enr"
+    fi
+    if [ -n "$node3_cl_enr" ] && [ "$node3_cl_enr" != "null" ]; then
+        if [ -n "$bootnode_args" ]; then
+            bootnode_args="$bootnode_args --bootnodes=$node3_cl_enr"
+        else
+            bootnode_args="--bootnodes=$node3_cl_enr"
+        fi
+    fi
+
+    # Start new lodestar beacon
+    log "  Starting new lodestar beacon (${CL_IMAGE_LODESTAR})..."
+    docker run -d --name "${CONTAINER_PREFIX}-node2-cl" \
+        --network "$DOCKER_NETWORK" --ip "$NODE2_CL_IP" \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$DATA_DIR/node2/cl:/data" \
+        -v "$GENERATED_DIR/cl:/cl-config" \
+        -v "$JWT_SECRET:/jwt" \
+        -p 5053:5051 -p 9001:9000 -p 9001:9000/udp \
+        "$CL_IMAGE_LODESTAR" \
+        beacon \
+        --network.connectToDiscv5Bootnodes \
+        --dataDir=/data \
+        --paramsFile=/cl-config/config.yaml \
+        --genesisStateFile=/cl-config/genesis.ssz \
+        --execution.urls="http://${CONTAINER_PREFIX}-node2-el:8551" \
+        --jwt-secret=/jwt \
+        --rest \
+        --rest.address=0.0.0.0 \
+        --rest.port=5051 \
+        --rest.cors="*" \
+        --port=9000 \
+        --enr.ip="$NODE2_CL_IP" \
+        --enr.tcp=9000 \
+        --enr.udp=9000 \
+        --targetPeers=2 \
+        --suggestedFeeRecipient="$ETHERBASE" \
+        --subscribeAllSubnets \
+        $bootnode_args
+
+    wait_for_cl "$NODE2_CL_IP" "5051" "node2"
+
+    # Start new lodestar validator
+    log "  Starting new lodestar validator..."
+    docker run -d --name "${CONTAINER_PREFIX}-node2-vc" \
+        --network "$DOCKER_NETWORK" \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$DATA_DIR/node2/vc:/data" \
+        -v "$GENERATED_DIR/cl:/cl-config" \
+        -v "$GENERATED_DIR/keys/node2:/keys" \
+        "$CL_IMAGE_LODESTAR" \
+        validator \
+        --dataDir=/data \
+        --paramsFile=/cl-config/config.yaml \
+        --beaconNodes="http://${CONTAINER_PREFIX}-node2-cl:5051" \
+        --keystoresDir=/keys/keys \
+        --secretsDir=/keys/secrets \
+        --suggestedFeeRecipient="$ETHERBASE"
+
+    mark_swapped "node2-cl"
+    log "  Node 2 CL swap complete."
+}
+
 # Node1 CL: lighthouse v5.3.0 -> latest
 # Stops beacon + VC, starts new versions. Geth EL stays running.
 # TIMING: Must happen right at the Electra fork boundary because:
 #   - lighthouse v5.3.0 does not support Electra (breaks at fork)
 #   - lighthouse latest has pre-Electra attestation format bug (broken before fork)
 #   So we stop v5.3.0 just before Electra and start latest immediately.
-#   Node1 validators (128/384) will miss a few slots during the swap; the other
-#   two nodes (256/384 = 2/3) maintain finality.
+#   Node1+Node2 validators (256/384) will miss a few slots during the swap;
+#   node3 (128/384 = 1/3) alone can't finalize, but the swaps are fast.
 swap_node1_cl() {
     if is_swapped "node1-cl"; then
         log "  node1-cl already swapped -- skipping."
@@ -573,6 +679,10 @@ cmd_status() {
                 deadline_epoch=$ELECTRA_EPOCH
                 swap_desc="daemon target: epoch $SWAP_NODE3_EL_EPOCH, deadline: epoch $deadline_epoch"
                 ;;
+            node2-cl)
+                deadline_epoch=$ELECTRA_EPOCH
+                swap_desc="daemon target: ~${SWAP_NODE2_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE2_CL_LEAD_SLOTS)))"
+                ;;
             node1-cl)
                 deadline_epoch=$ELECTRA_EPOCH
                 swap_desc="daemon target: ~${SWAP_NODE1_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE1_CL_LEAD_SLOTS)))"
@@ -593,6 +703,7 @@ cmd_status() {
             node1-el) log "  node1-el  geth v1.11.6 -> latest           $status_str" ;;
             node2-el) log "  node2-el  geth v1.11.6 -> latest           $status_str" ;;
             node3-el) log "  node3-el  besu 24.10.0 -> latest           $status_str" ;;
+            node2-cl) log "  node2-cl  lodestar v1.38.0 -> latest       $status_str" ;;
             node1-cl) log "  node1-cl  lighthouse v5.3.0 -> latest      $status_str" ;;
         esac
 }
@@ -607,11 +718,12 @@ cmd_daemon() {
     log "  node1-el  geth old -> new         at epoch $SWAP_NODE1_EL_EPOCH  (before Deneb @ $DENEB_EPOCH)"
     log "  node2-el  geth old -> new         at epoch $SWAP_NODE2_EL_EPOCH  (before Deneb @ $DENEB_EPOCH)"
     log "  node3-el  besu old -> new         at epoch $SWAP_NODE3_EL_EPOCH  (before Electra @ $ELECTRA_EPOCH)"
+    log "  node2-cl  lodestar old -> new     ~${SWAP_NODE2_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE2_CL_LEAD_SLOTS)))"
     log "  node1-cl  lighthouse old -> new   ~${SWAP_NODE1_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE1_CL_LEAD_SLOTS)))"
     log ""
-    log "  Note: node1-cl uses slot-level timing because lighthouse latest has a"
-    log "  pre-Electra attestation format bug. The swap is timed so new lighthouse"
-    log "  starts up right at the Electra fork boundary."
+    log "  Note: CL swaps use slot-level timing. Lighthouse latest has a pre-Electra"
+    log "  attestation bug; Lodestar latest dropped pre-Electra block production."
+    log "  Both swap right at the Electra fork boundary."
     log ""
 
     # Check if all swaps already done
@@ -679,12 +791,16 @@ cmd_daemon() {
                         should_swap=true
                     fi
                     ;;
+                node2-cl)
+                    # Slot-level precision: swap lodestar before Electra
+                    local swap_slot=$((ELECTRA_FIRST_SLOT - SWAP_NODE2_CL_LEAD_SLOTS))
+                    if [ "$current_slot" -ge "$swap_slot" ]; then
+                        should_swap=true
+                    fi
+                    ;;
                 node1-cl)
                     # Slot-level precision: swap N slots before Electra so new
                     # lighthouse comes online right at the fork boundary.
-                    # This minimizes pre-Electra exposure of lighthouse latest
-                    # (attestation format bug) while ensuring v5.3.0 doesn't
-                    # hit the Electra fork it can't handle.
                     local swap_slot=$((ELECTRA_FIRST_SLOT - SWAP_NODE1_CL_LEAD_SLOTS))
                     if [ "$current_slot" -ge "$swap_slot" ]; then
                         should_swap=true
@@ -752,14 +868,14 @@ cmd_swap() {
     local expanded=()
     for t in "${targets[@]}"; do
         case "$t" in
-            node1-el|node1-cl|node2-el|node3-el)
+            node1-el|node1-cl|node2-el|node2-cl|node3-el)
                 expanded+=("$t")
                 ;;
             node1)
                 expanded+=("node1-el" "node1-cl")
                 ;;
             node2)
-                expanded+=("node2-el")
+                expanded+=("node2-el" "node2-cl")
                 ;;
             node3)
                 expanded+=("node3-el")
@@ -805,6 +921,7 @@ cmd_swap() {
         case "$target" in
             node1-el) log "  node1-el: geth v1.11.6 -> ${EL_IMAGE_NEW_GETH}  [EL:8545]" ;;
             node2-el) log "  node2-el: geth v1.11.6 -> ${EL_IMAGE_NEW_GETH}  [EL:8546]" ;;
+            node2-cl) log "  node2-cl: lodestar v1.38.0 -> ${CL_IMAGE_LODESTAR}  [CL:5053]" ;;
             node1-cl) log "  node1-cl: lighthouse v5.3.0 -> ${CL_IMAGE_LIGHTHOUSE}  [CL:5052]" ;;
             node3-el) log "  node3-el: besu 24.10.0 -> ${EL_IMAGE_NEW_BESU}  [EL:8547]" ;;
         esac
@@ -850,7 +967,7 @@ case "$COMMAND" in
         cmd_status
         ;;
     # Allow bare swap targets without the "swap" keyword for convenience
-    node1-el|node1-cl|node2-el|node3-el|node1|node2|node3|all)
+    node1-el|node1-cl|node2-el|node2-cl|node3-el|node1|node2|node3|all)
         cmd_swap "$COMMAND" "$@"
         ;;
     *)
