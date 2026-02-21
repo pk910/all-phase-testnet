@@ -851,11 +851,17 @@ cmd_daemon() {
                     fi
                 fi
 
-                "swap_${target//-/_}"
-
-                log ""
-                log "Swap $target complete. Resuming monitoring..."
-                log ""
+                # Run swap, but don't crash daemon if it fails
+                if "swap_${target//-/_}"; then
+                    log ""
+                    log "Swap $target complete. Resuming monitoring..."
+                    log ""
+                else
+                    log ""
+                    log "ERROR: Swap $target FAILED (exit code $?). Skipping and continuing with remaining swaps..."
+                    log ""
+                    mark_swapped "$target"  # mark as done so we don't retry endlessly
+                fi
 
                 # Brief pause after a swap before checking next target
                 sleep 30
