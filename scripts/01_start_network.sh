@@ -173,7 +173,7 @@ start_node1() {
         --mine --miner.threads=1 \
         --miner.etherbase="$ETHERBASE" \
         --http --http.addr=0.0.0.0 --http.port=8545 \
-        --http.api=eth,net,web3,debug,admin,txpool \
+        --http.api=eth,net,web3,debug,trace,admin,txpool \
         --http.corsdomain="*" --http.vhosts="*" \
         --authrpc.addr=0.0.0.0 --authrpc.port=8551 \
         --authrpc.jwtsecret=/jwt \
@@ -271,7 +271,7 @@ start_node3() {
         --network-id="$CHAIN_ID" \
         --miner-enabled --miner-coinbase="$ETHERBASE" \
         --rpc-http-enabled --rpc-http-host=0.0.0.0 --rpc-http-port=8545 \
-        --rpc-http-api=ETH,NET,WEB3,DEBUG,ADMIN,TXPOOL \
+        --rpc-http-api=ETH,NET,WEB3,DEBUG,TRACE,ADMIN,TXPOOL \
         --rpc-http-cors-origins="*" --host-allowlist="*" \
         --engine-rpc-port=8551 --engine-host-allowlist="*" \
         --engine-jwt-secret=/jwt \
@@ -396,7 +396,7 @@ start_node2() {
         --JsonRpc.Enabled=true --JsonRpc.Host=0.0.0.0 --JsonRpc.Port=8545 \
         --JsonRpc.EngineHost=0.0.0.0 --JsonRpc.EnginePort=8551 \
         --JsonRpc.JwtSecretFile=/jwt \
-        --JsonRpc.EnabledModules="Eth,Net,Web3,Admin" \
+        --JsonRpc.EnabledModules="Eth,Net,Web3,Admin,Debug,Trace,TxPool" \
         --Network.DiscoveryPort=30303 --Network.P2PPort=30303 \
         $nm_static_peers
 
