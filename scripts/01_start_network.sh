@@ -105,7 +105,7 @@ load_config() {
     # Public IP for external-facing services (auto-detect or override via config)
     PUBLIC_IP=$(read_config_default "public_ip" "")
     if [ -z "$PUBLIC_IP" ]; then
-        PUBLIC_IP=$(curl -s --max-time 3 https://ifconfig.me 2>/dev/null || curl -s --max-time 3 https://api.ipify.org 2>/dev/null || echo "localhost")
+        PUBLIC_IP=$(curl -4 -s --max-time 3 https://ifconfig.me 2>/dev/null || curl -4 -s --max-time 3 https://api.ipify.org 2>/dev/null || echo "localhost")
         log "  Auto-detected public IP: $PUBLIC_IP"
     fi
 }
