@@ -46,7 +46,7 @@ SLOTS_PER_EPOCH=$(read_config "slots_per_epoch")
 SECONDS_PER_SLOT=$(read_config "seconds_per_slot")
 MINER_THREADS=4
 # Start miner this many slots before bellatrix (DAG generation + chain sync)
-MINER_LEAD_SLOTS=20
+MINER_LEAD_SLOTS=10
 
 #--- Merge boost (background) ---
 merge_boost() {

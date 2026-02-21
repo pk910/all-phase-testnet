@@ -286,6 +286,7 @@ start_node3() {
         --p2p-port=30303 \
         --sync-mode=FULL \
         --min-gas-price=0 \
+        --Xbonsai-parallel-tx-processing-enabled=false \
         $besu_bootnodes
 
     log "  Besu container: ${CONTAINER_PREFIX}-node3-el"

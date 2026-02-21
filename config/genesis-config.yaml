@@ -13,21 +13,21 @@ slots_per_epoch: 32
 
 # Fork schedule (CL epochs)
 altair_fork_epoch: 1
-bellatrix_fork_epoch: 3
-capella_fork_epoch: 5
-deneb_fork_epoch: 6
-electra_fork_epoch: 7
-fulu_fork_epoch: 8
+bellatrix_fork_epoch: 2
+capella_fork_epoch: 4
+deneb_fork_epoch: 5
+electra_fork_epoch: 6
+fulu_fork_epoch: 7
 
 # Blob Parameter Override schedule (post-PeerDAS blob count increases)
-bpo1_fork_epoch: 9                   # BPO1: increase max blobs
+bpo1_fork_epoch: 8                   # BPO1: increase max blobs
 bpo1_max_blobs: 15
-bpo2_fork_epoch: 10                  # BPO2: further increase max blobs
+bpo2_fork_epoch: 9                   # BPO2: further increase max blobs
 bpo2_max_blobs: 30
 
 # PoW / Merge
 genesis_difficulty: "0x80000"
-# terminal_total_difficulty: auto-calculated to target merge ~1 epoch after bellatrix
+# terminal_total_difficulty: auto-calculated to target merge ~1 epoch after bellatrix (epoch 3)
 
 # Validators (per node)
 validators_per_node: 128
@@ -49,6 +49,7 @@ el_image_new_besu: "hyperledger/besu:latest"
 
 # CL Client images
 cl_image_old_lighthouse: "sigp/lighthouse:v5.3.0"
+cl_image_mid_lighthouse: "sigp/lighthouse:v6.0.0"   # intermediate for DB migration (v5→v6 bridges schema v21→v22)
 cl_image_lighthouse: "sigp/lighthouse:latest"
 cl_image_old_lodestar: "chainsafe/lodestar:v1.38.0"
 cl_image_lodestar: "chainsafe/lodestar:latest"
