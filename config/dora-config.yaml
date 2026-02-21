@@ -14,7 +14,7 @@ frontend:
   minimize: false
   siteName: "Dora the Explorer"
   siteSubtitle: "All-Phase Testnet"
-  validatorNamesYaml: "/config/validator-names.yaml"
+  validatorNamesYaml: "/validator-names.yaml"
 
 beaconapi:
   endpoints:

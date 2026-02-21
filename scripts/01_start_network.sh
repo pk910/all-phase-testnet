@@ -477,7 +477,7 @@ start_dora() {
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$CONFIG_DIR/dora-config.yaml:/config/dora-config.yaml" \
-        -v "$CONFIG_DIR/validator-names.yaml:/config/validator-names.yaml" \
+        -v "$GENERATED_DIR/validator-names.yaml:/validator-names.yaml" \
         -v "$GENERATED_DIR/cl:/network-configs" \
         -v "$DATA_DIR/dora:/data" \
         -p 8090:8080 \

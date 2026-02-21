@@ -541,6 +541,25 @@ echo -n "password" > "$GENERATED_DIR/keys/prysm-password.txt"
 log "  -> $GENERATED_DIR/keys/prysm-password.txt"
 
 #############################################################################
+# 7. Generate validator names for Dora
+#############################################################################
+log "Generating validator names..."
+
+# Node-to-client mapping (must match 01_start_network.sh)
+NODE_CLIENTS=("geth/lighthouse" "nethermind/teku" "besu/prysm")
+
+NAMES_FILE="$GENERATED_DIR/validator-names.yaml"
+> "$NAMES_FILE"
+for i in $(seq 1 $NODE_COUNT); do
+    OFFSET=$(( (i - 1) * VALIDATORS_PER_NODE ))
+    END=$(( OFFSET + VALIDATORS_PER_NODE - 1 ))
+    CLIENT="${NODE_CLIENTS[$((i - 1))]}"
+    echo "${OFFSET}-${END}: \"node${i} - ${CLIENT}\"" >> "$NAMES_FILE"
+done
+
+log "  -> $NAMES_FILE"
+
+#############################################################################
 # Summary
 #############################################################################
 log ""
