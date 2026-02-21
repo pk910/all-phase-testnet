@@ -40,7 +40,7 @@ el_image_old_geth: "ethereum/client-go:v1.11.6"
 el_image_old_besu: "hyperledger/besu:24.10.0"
 el_image_new_geth: "ethereum/client-go:latest"
 el_image_new_besu: "hyperledger/besu:latest"
-el_image_old_nethermind: "nethermind/nethermind:1.26.0"
+el_image_old_nethermind: "nethermind/nethermind:1.25.3"
 el_image_nethermind: "nethermind/nethermind:latest"
 
 # CL Client images

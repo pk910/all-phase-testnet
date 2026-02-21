@@ -397,7 +397,6 @@ start_node2() {
         "$EL_IMAGE_OLD_NETHERMIND" \
         --datadir=/data \
         --Init.ChainSpecPath=/genesis.json \
-        --Merge.Enabled=false \
         --Sync.FastSync=false \
         --Sync.SnapSync=false \
         --JsonRpc.Enabled=true --JsonRpc.Host=0.0.0.0 --JsonRpc.Port=8545 \
