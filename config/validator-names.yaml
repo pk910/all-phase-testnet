@@ -1,0 +1,3 @@
+0-127: "node1 - lighthouse"
+128-255: "node2 - teku"
+256-383: "node3 - prysm"
