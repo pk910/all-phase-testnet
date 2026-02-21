@@ -91,6 +91,7 @@ load_config() {
 
     EL_IMAGE_GETH=$(read_config "el_image_old_geth")
     EL_IMAGE_BESU=$(read_config "el_image_old_besu")
+    EL_IMAGE_OLD_NETHERMIND=$(read_config "el_image_old_nethermind")
     EL_IMAGE_NETHERMIND=$(read_config "el_image_nethermind")
     CL_IMAGE_OLD_LIGHTHOUSE=$(read_config "cl_image_old_lighthouse")
     CL_IMAGE_LIGHTHOUSE=$(read_config "cl_image_lighthouse")
@@ -115,7 +116,7 @@ pull_images() {
     for c in "${COMPONENTS[@]}"; do
         case "$c" in
             node1) images+=("$EL_IMAGE_GETH" "$CL_IMAGE_OLD_LIGHTHOUSE") ;;
-            node2) images+=("$EL_IMAGE_NETHERMIND" "$CL_IMAGE_TEKU") ;;
+            node2) images+=("$EL_IMAGE_OLD_NETHERMIND" "$CL_IMAGE_TEKU") ;;
             node3) images+=("$EL_IMAGE_BESU" "$CL_IMAGE_PRYSM_BEACON" "$CL_IMAGE_PRYSM_VALIDATOR") ;;
             dora) images+=("$DORA_IMAGE") ;;
             spamoor) images+=("$SPAMOOR_IMAGE") ;;
@@ -393,7 +394,7 @@ start_node2() {
         -v "$GENERATED_DIR/el/nethermind-genesis.json:/genesis.json" \
         -v "$JWT_SECRET:/jwt" \
         -p 8546:8545 -p 8552:8551 -p 30304:30303 -p 30304:30303/udp \
-        "$EL_IMAGE_NETHERMIND" \
+        "$EL_IMAGE_OLD_NETHERMIND" \
         --datadir=/data \
         --Init.ChainSpecPath=/genesis.json \
         --Merge.Enabled=false \
