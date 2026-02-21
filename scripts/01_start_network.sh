@@ -211,7 +211,8 @@ start_node1() {
         --enr-tcp-port=9000 \
         --port=9000 \
         --disable-peer-scoring \
-        --target-peers=2
+        --target-peers=2 \
+        --subscribe-all-subnets
 
     log "  Lighthouse container: ${CONTAINER_PREFIX}-node1-cl"
 
@@ -322,6 +323,7 @@ start_node3() {
         --p2p-static-id=true \
         --min-sync-peers=0 \
         --suggested-fee-recipient="$ETHERBASE" \
+        --subscribe-all-subnets=true \
         $prysm_bootnodes
 
     log "  Prysm container: ${CONTAINER_PREFIX}-node3-cl"
@@ -455,6 +457,7 @@ start_node2() {
         --p2p-advertised-ip="$NODE2_CL_IP" \
         --validator-keys=/teku-keys:/teku-secrets \
         --validators-proposer-default-fee-recipient="$ETHERBASE" \
+        --p2p-subscribe-all-subnets-enabled=true \
         $teku_static_peers
 
     log "  Teku container: ${CONTAINER_PREFIX}-node2-cl"
