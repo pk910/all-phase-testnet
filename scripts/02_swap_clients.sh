@@ -627,7 +627,14 @@ swap_node3_el() {
     docker stop -t 30 "${CONTAINER_PREFIX}-node3-el" >/dev/null 2>&1 || true
     docker rm -f "${CONTAINER_PREFIX}-node3-el" >/dev/null 2>&1 || true
 
-    # Start new besu (same datadir, no mining flags)
+    # Clean besu chain data (besu stores genesis hash and rejects modified genesis on old data)
+    # Keep the key file so the enode stays the same
+    log "  Cleaning besu chain data (keeping key file)..."
+    docker run --rm \
+        -v "$DATA_DIR/node3/el:/data" \
+        alpine sh -c "rm -rf /data/database /data/caches /data/DATABASE_METADATA.json /data/VERSION_METADATA.json"
+
+    # Start new besu (clean datadir, no mining flags)
     log "  Starting new besu (${EL_IMAGE_NEW_BESU})..."
     docker run -d --name "${CONTAINER_PREFIX}-node3-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE3_EL_IP" \
