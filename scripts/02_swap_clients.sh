@@ -127,13 +127,12 @@ load_config() {
     SWAP_NODE1_EL_EPOCH=$(( CAPELLA_EPOCH + (DENEB_EPOCH - CAPELLA_EPOCH) / 3 ))
     # Ensure at least capella epoch
     if [ "$SWAP_NODE1_EL_EPOCH" -lt "$CAPELLA_EPOCH" ]; then SWAP_NODE1_EL_EPOCH=$CAPELLA_EPOCH; fi
-    #   node1-cl-mid: after EL swaps done, before Deneb (intermediate lighthouse for DB migration)
-    SWAP_NODE1_CL_MID_EPOCH=$SWAP_NODE2_EL_EPOCH
-    if [ "$SWAP_NODE1_CL_MID_EPOCH" -le "$SWAP_NODE2_EL_EPOCH" ]; then SWAP_NODE1_CL_MID_EPOCH=$((SWAP_NODE2_EL_EPOCH + 1)); fi
-    if [ "$SWAP_NODE1_CL_MID_EPOCH" -ge "$DENEB_EPOCH" ]; then SWAP_NODE1_CL_MID_EPOCH=$((DENEB_EPOCH - 1)); fi
     #   node2-el: second third of [Capella, Deneb)
     SWAP_NODE2_EL_EPOCH=$(( CAPELLA_EPOCH + 2 * (DENEB_EPOCH - CAPELLA_EPOCH) / 3 ))
     if [ "$SWAP_NODE2_EL_EPOCH" -le "$SWAP_NODE1_EL_EPOCH" ]; then SWAP_NODE2_EL_EPOCH=$((SWAP_NODE1_EL_EPOCH)); fi
+    #   node1-cl-mid: after EL swaps done, before Deneb (intermediate lighthouse for DB migration)
+    SWAP_NODE1_CL_MID_EPOCH=$((SWAP_NODE2_EL_EPOCH + 1))
+    if [ "$SWAP_NODE1_CL_MID_EPOCH" -ge "$DENEB_EPOCH" ]; then SWAP_NODE1_CL_MID_EPOCH=$((DENEB_EPOCH - 1)); fi
     #   node3-el: midpoint of [Deneb, Electra)
     SWAP_NODE3_EL_EPOCH=$(( DENEB_EPOCH + (ELECTRA_EPOCH - DENEB_EPOCH) / 2 ))
     if [ "$SWAP_NODE3_EL_EPOCH" -lt "$DENEB_EPOCH" ]; then SWAP_NODE3_EL_EPOCH=$DENEB_EPOCH; fi
