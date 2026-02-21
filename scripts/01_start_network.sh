@@ -92,6 +92,7 @@ load_config() {
     EL_IMAGE_GETH=$(read_config "el_image_old_geth")
     EL_IMAGE_BESU=$(read_config "el_image_old_besu")
     EL_IMAGE_NETHERMIND=$(read_config "el_image_nethermind")
+    CL_IMAGE_OLD_LIGHTHOUSE=$(read_config "cl_image_old_lighthouse")
     CL_IMAGE_LIGHTHOUSE=$(read_config "cl_image_lighthouse")
     CL_IMAGE_TEKU=$(read_config "cl_image_teku")
     CL_IMAGE_PRYSM_BEACON=$(read_config "cl_image_prysm_beacon")
@@ -113,7 +114,7 @@ pull_images() {
     local images=()
     for c in "${COMPONENTS[@]}"; do
         case "$c" in
-            node1) images+=("$EL_IMAGE_GETH" "$CL_IMAGE_LIGHTHOUSE") ;;
+            node1) images+=("$EL_IMAGE_GETH" "$CL_IMAGE_OLD_LIGHTHOUSE") ;;
             node2) images+=("$EL_IMAGE_NETHERMIND" "$CL_IMAGE_TEKU") ;;
             node3) images+=("$EL_IMAGE_BESU" "$CL_IMAGE_PRYSM_BEACON" "$CL_IMAGE_PRYSM_VALIDATOR") ;;
             dora) images+=("$DORA_IMAGE") ;;
@@ -198,7 +199,7 @@ start_node1() {
         -v "$GENERATED_DIR/cl:/cl-config" \
         -v "$JWT_SECRET:/jwt" \
         -p 5052:5052 -p 9000:9000 -p 9000:9000/udp \
-        "$CL_IMAGE_LIGHTHOUSE" \
+        "$CL_IMAGE_OLD_LIGHTHOUSE" \
         lighthouse bn \
         --testnet-dir=/cl-config \
         --datadir=/data \
@@ -210,7 +211,6 @@ start_node1() {
         --enr-udp-port=9000 \
         --enr-tcp-port=9000 \
         --port=9000 \
-        --disable-peer-scoring \
         --target-peers=2 \
         --subscribe-all-subnets
 
@@ -225,7 +225,7 @@ start_node1() {
         -v "$DATA_DIR/node1/vc:/data" \
         -v "$GENERATED_DIR/cl:/cl-config" \
         -v "$GENERATED_DIR/keys/node1:/keys" \
-        "$CL_IMAGE_LIGHTHOUSE" \
+        "$CL_IMAGE_OLD_LIGHTHOUSE" \
         lighthouse vc \
         --testnet-dir=/cl-config \
         --validators-dir=/keys/keys \

@@ -43,6 +43,7 @@ el_image_new_besu: "hyperledger/besu:latest"
 el_image_nethermind: "nethermind/nethermind:latest"
 
 # CL Client images
+cl_image_old_lighthouse: "sigp/lighthouse:v5.3.0"
 cl_image_lighthouse: "sigp/lighthouse:latest"
 cl_image_teku: "consensys/teku:latest"
 cl_image_prysm_beacon: "gcr.io/prysmaticlabs/prysm/beacon-chain:latest"
