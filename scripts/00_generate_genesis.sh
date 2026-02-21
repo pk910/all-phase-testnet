@@ -132,33 +132,36 @@ if [ -z "$DEPOSIT_ALLOC" ]; then
     exit 1
 fi
 
-# Build prefunded accounts alloc
+# Build prefunded accounts alloc (derived from mnemonic)
 PREFUND_MNEMONIC=$(read_config "prefund_mnemonic")
 PREFUND_COUNT=$(read_config "prefund_count")
 PREFUND_BALANCE=$(read_config "prefund_balance")
 
+# Derive addresses and private keys from mnemonic using geth-hdwallet in docker
+log "  Deriving pre-funded accounts from mnemonic..."
+> "$GENERATED_DIR/prefunded_accounts.txt"
+for idx in $(seq 0 $((PREFUND_COUNT - 1))); do
+    OUTPUT=$(docker run --rm --entrypoint "" \
+        "ethpandaops/ethereum-genesis-generator:master" \
+        geth-hdwallet -mnemonic "$PREFUND_MNEMONIC" -path "m/44'/60'/0'/0/$idx")
+    ADDR=$(echo "$OUTPUT" | grep "public address:" | awk '{print $3}')
+    KEY=$(echo "$OUTPUT" | grep "private key:" | awk '{print $3}')
+    echo "${ADDR},0x${KEY}" >> "$GENERATED_DIR/prefunded_accounts.txt"
+done
+
+log "  -> $GENERATED_DIR/prefunded_accounts.txt ($(wc -l < "$GENERATED_DIR/prefunded_accounts.txt") accounts)"
+
 PREFUND_ALLOC=$(python3 << PYEOF
 import json
-# Generate deterministic addresses from mnemonic path
-# For simplicity, use well-known hardhat/foundry test addresses from "test test ... junk"
-# These are the standard addresses for this mnemonic
-test_addresses = [
-    "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
-    "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-    "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
-    "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
-    "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
-    "0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc",
-    "0x976EA74026E726554dB657fA54763abd0C3a0aa9",
-    "0x14dC79964da2C08dA15Fd353d30d9cBfc8221200",
-    "0x23618e81E3f5cdF7f54C3d65f7FBc0aBf5B21E8f",
-    "0xa0Ee7A142d267C1f36714E4a8F75612F20a79720"
-]
 
 alloc = {}
-for i in range(min(int("$PREFUND_COUNT"), len(test_addresses))):
-    addr = test_addresses[i]
-    alloc[addr] = {"balance": "$PREFUND_BALANCE"}
+with open("$GENERATED_DIR/prefunded_accounts.txt") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        addr = line.split(",")[0]
+        alloc[addr] = {"balance": "$PREFUND_BALANCE"}
 
 print(json.dumps(alloc))
 PYEOF
