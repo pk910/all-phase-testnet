@@ -719,6 +719,14 @@ swap_node3_el() {
         -v "$DATA_DIR/node3/el:/data" \
         alpine sh -c "rm -rf /data/database /data/caches /data/DATABASE_METADATA.json /data/VERSION_METADATA.json"
 
+    # Get bootnodes from running peers
+    local node1_enode besu_bootnodes=""
+    node1_enode=$(get_node1_enode)
+    if [ -n "$node1_enode" ]; then
+        besu_bootnodes="--bootnodes=$node1_enode"
+        log "  Bootnode: $node1_enode"
+    fi
+
     # Start new besu (clean datadir, no mining flags)
     log "  Starting new besu (${EL_IMAGE_NEW_BESU})..."
     docker run -d --name "${CONTAINER_PREFIX}-node3-el" \
@@ -740,7 +748,8 @@ swap_node3_el() {
         --engine-jwt-secret=/jwt \
         --p2p-port=30303 \
         --sync-mode=FULL \
-        --min-gas-price=0
+        --min-gas-price=0 \
+        $besu_bootnodes
 
     wait_for_el "$NODE3_EL_IP" "node3"
     check_el_peers "$NODE3_EL_IP" "node3"
