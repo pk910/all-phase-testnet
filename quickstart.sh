@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/scripts/lib/common.sh"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$PROJECT_DIR/scripts/lib/common.sh"
 
 echo ""
 echo "=== All-Phase Testnet Quick Start ==="
@@ -16,7 +16,7 @@ echo ""
 #############################################################################
 echo "--- Step 1: Generate genesis ---"
 echo ""
-bash "$SCRIPT_DIR/scripts/00_generate_genesis.sh"
+bash "$PROJECT_DIR/scripts/00_generate_genesis.sh"
 
 #############################################################################
 # Step 2: Start network
@@ -24,7 +24,7 @@ bash "$SCRIPT_DIR/scripts/00_generate_genesis.sh"
 echo ""
 echo "--- Step 2: Start network ---"
 echo ""
-bash "$SCRIPT_DIR/scripts/01_start_network.sh"
+bash "$PROJECT_DIR/scripts/01_start_network.sh"
 
 #############################################################################
 # Step 3: Merge boost — start extra miners at bellatrix, stop after merge
@@ -53,7 +53,7 @@ merge_boost() {
     done
 
     # Start extra miners
-    bash "$SCRIPT_DIR/scripts/03_extra_miner.sh" start "$EXTRA_MINERS"
+    bash "$PROJECT_DIR/scripts/03_extra_miner.sh" start "$EXTRA_MINERS"
 
     # Wait for merge (block difficulty drops to 0)
     log "  Miners running. Waiting for merge (difficulty=0)..."
@@ -71,7 +71,7 @@ merge_boost() {
     done
 
     # Stop extra miners
-    bash "$SCRIPT_DIR/scripts/03_extra_miner.sh" stop all
+    bash "$PROJECT_DIR/scripts/03_extra_miner.sh" stop all
     log "  Merge boost complete."
 }
 
@@ -93,18 +93,18 @@ echo "--- Step 4: Starting swap daemon ---"
 echo ""
 
 if command -v tmux &>/dev/null; then
-    tmux new-session -d -s allphase-swap "bash '$SCRIPT_DIR/scripts/02_swap_clients.sh' daemon; echo 'Swap daemon finished. Press enter to close.'; read"
+    tmux new-session -d -s allphase-swap "bash '$PROJECT_DIR/scripts/02_swap_clients.sh' daemon; echo 'Swap daemon finished. Press enter to close.'; read"
     echo "Swap daemon started in tmux session 'allphase-swap'"
     echo "  Attach: tmux attach -t allphase-swap"
 elif command -v screen &>/dev/null; then
-    screen -dmS allphase-swap bash "$SCRIPT_DIR/scripts/02_swap_clients.sh" daemon
+    screen -dmS allphase-swap bash "$PROJECT_DIR/scripts/02_swap_clients.sh" daemon
     echo "Swap daemon started in screen session 'allphase-swap'"
     echo "  Attach: screen -r allphase-swap"
 else
     echo "Neither tmux nor screen found. Running swap daemon in foreground."
     echo "Press Ctrl+C to stop the daemon (network will keep running)."
     echo ""
-    bash "$SCRIPT_DIR/scripts/02_swap_clients.sh" daemon
+    bash "$PROJECT_DIR/scripts/02_swap_clients.sh" daemon
     wait "$MERGE_BOOST_PID" 2>/dev/null || true
     exit 0
 fi
