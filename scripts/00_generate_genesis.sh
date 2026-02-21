@@ -40,16 +40,16 @@ CL_GENESIS_TIME=$((GENESIS_TIMESTAMP + GENESIS_DELAY))
 # TTD calculation
 TTD=$(read_config "terminal_total_difficulty")
 if [ -z "$TTD" ] || [ "$TTD" = "null" ]; then
-    # Auto-calculate: target merge around 5 epochs after bellatrix
-    MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 5))
-    MERGE_TARGET_SECONDS=$((MERGE_TARGET_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
-    # Ethash minimum difficulty is 131072 (0x20000), blocks are mined fast on testnet (~1-2s)
-    # Estimate: 1 block per 2 seconds average
-    ESTIMATED_BLOCKS=$((MERGE_TARGET_SECONDS / 2))
-    # Ethash minimum difficulty is 131072
-    AVG_DIFFICULTY=131072
-    TTD=$((ESTIMATED_BLOCKS * AVG_DIFFICULTY))
-    log "Auto-calculated TTD: $TTD (target merge at ~epoch $MERGE_TARGET_EPOCH, ~$ESTIMATED_BLOCKS blocks × $AVG_DIFFICULTY avg difficulty)"
+    # Auto-calculate: target merge ~1 epoch after bellatrix
+    MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 1))
+    # Total mining time from EL start = genesis_delay + merge_target in seconds
+    TOTAL_MINING_SECONDS=$((GENESIS_DELAY + MERGE_TARGET_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
+    # Conservative estimate: 1 block per 2 seconds (with 2+ miners)
+    ESTIMATED_BLOCKS=$((TOTAL_MINING_SECONDS / 2))
+    # Use genesis difficulty as average (difficulty adjusts up from here)
+    GENESIS_DIFF_DEC=$(printf "%d" "$GENESIS_DIFFICULTY")
+    TTD=$((ESTIMATED_BLOCKS * GENESIS_DIFF_DEC))
+    log "Auto-calculated TTD: $TTD (target merge at ~epoch $MERGE_TARGET_EPOCH, ${TOTAL_MINING_SECONDS}s mining, ~$ESTIMATED_BLOCKS blocks × $GENESIS_DIFF_DEC avg difficulty)"
 else
     log "Using manual TTD: $TTD"
 fi
@@ -441,6 +441,10 @@ MIN_PER_EPOCH_CHURN_LIMIT_ELECTRA: 128000000000
 MAX_PER_EPOCH_ACTIVATION_EXIT_CHURN_LIMIT: 256000000000
 
 # Networking (required by Teku)
+GOSSIP_MAX_SIZE: 10485760
+MAX_CHUNK_SIZE: 10485760
+RESP_TIMEOUT: 10
+TTFB_TIMEOUT: 5
 MAX_PAYLOAD_SIZE: 10485760
 MAX_REQUEST_BLOCKS: 1024
 EPOCHS_PER_SUBNET_SUBSCRIPTION: 256
@@ -546,7 +550,7 @@ log "  -> $GENERATED_DIR/keys/prysm-password.txt"
 log "Generating validator names..."
 
 # Node-to-client mapping (must match 01_start_network.sh)
-NODE_CLIENTS=("geth/lighthouse" "nethermind/teku" "besu/prysm")
+NODE_CLIENTS=("geth/lighthouse" "geth/lodestar" "besu/prysm")
 
 NAMES_FILE="$GENERATED_DIR/validator-names.yaml"
 > "$NAMES_FILE"

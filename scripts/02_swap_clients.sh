@@ -12,35 +12,38 @@ source "$SCRIPT_DIR/lib/common.sh"
 #   geth latest        Mining: NO   Merge: YES  Shanghai: YES  Cancun: YES  Prague: YES  (Engine API V1-V4)
 #   besu 24.10.0       Mining: YES  Merge: YES  Shanghai: YES  Cancun: YES  Prague: exp  (Engine API V1-V3, V4 experimental)
 #   besu latest        Mining: NO   Merge: YES  Shanghai: YES  Cancun: YES  Prague: YES  (Engine API V1-V4)
-#   nethermind 1.25.4  Mining: NO   Merge: YES  Shanghai: YES  Cancun: YES  Prague: NO   (Engine API V1-V3)
-#   nethermind latest  Mining: NO   Merge: NO   Shanghai: YES  Cancun: YES  Prague: YES  (Engine API V2-V5)
 #
 # CL Clients:
 #   lighthouse v5.3.0  Phase0: YES  Altair: YES  Bellatrix: YES  Capella: YES  Deneb: YES  Electra: NO   Fulu: NO
 #   lighthouse latest  Phase0: BUG  Altair: BUG  Bellatrix: BUG  Capella: BUG  Deneb: BUG  Electra: YES  Fulu: YES
 #     NOTE: lighthouse latest has a pre-Electra attestation format bug — it cannot operate correctly
 #           before the Electra fork. This constrains the CL swap to happen AT the Electra boundary.
-#   teku latest        All forks supported (no swap needed)
+#   lodestar latest    All forks supported (no swap needed)
 #   prysm latest       All forks supported (no swap needed)
+#
+# Node configuration:
+#   node1: geth v1.11.6 + lighthouse v5.3.0    → needs EL swap before Deneb, CL swap at Electra
+#   node2: geth v1.11.6 + lodestar latest      → needs EL swap before Deneb (CL no swap needed)
+#   node3: besu 24.10.0 + prysm latest          → needs EL swap before Electra
 #
 # Required Swap Timing:
 #   node1-el  geth v1.11.6 -> latest       BEFORE Deneb    (no Engine API V3 / no Cancun support)
-#   node2-el  nethermind 1.25.4 -> latest   BEFORE Electra  (no Engine API V4 / no Prague support)
+#   node2-el  geth v1.11.6 -> latest       BEFORE Deneb    (same as node1-el)
 #   node3-el  besu 24.10.0 -> latest        BEFORE Electra  (only experimental Prague Engine API V4)
 #   node1-cl  lighthouse v5.3.0 -> latest   AT Electra      (v5.3.0 breaks at Electra, latest breaks before it)
 #
 # Swap Windows (derived from fork schedule):
 #   node1-el: [Capella .. Deneb)        swap geth after Shanghai works, before Cancun needed
-#   node2-el: [Deneb .. Electra)        swap nethermind after Deneb works, before Prague needed
+#   node2-el: [Capella .. Deneb)        swap geth after Shanghai works, before Cancun needed
 #   node3-el: [Deneb .. Electra)        swap besu after Deneb works, before Prague needed
 #   node1-cl: AT Electra boundary       lighthouse latest has pre-Electra attestation bug,
 #                                        v5.3.0 has no Electra support — must swap right at the fork
 #
 # Default daemon schedule (staggered):
-#   node1-el: capella + (deneb - capella) / 2                midpoint of Capella→Deneb
-#   node2-el: deneb + (electra - deneb) / 3                  first third of Deneb→Electra
-#   node3-el: deneb + 2*(electra - deneb) / 3                second third of Deneb→Electra
-#   node1-cl: ~2 min before Electra epoch (slot-precise)      minimize pre-Electra exposure
+#   node1-el: first third of [Capella, Deneb)
+#   node2-el: second third of [Capella, Deneb)
+#   node3-el: midpoint of [Deneb, Electra)
+#   node1-cl: ~8 slots before Electra epoch (slot-precise)
 #############################################################################
 
 #############################################################################
@@ -60,7 +63,7 @@ Commands:
 
 Swap targets:
   node1-el   Swap node1 EL: geth v1.11.6 -> latest        (before Deneb)
-  node2-el   Swap node2 EL: nethermind 1.25.4 -> latest    (before Electra)
+  node2-el   Swap node2 EL: geth v1.11.6 -> latest        (before Deneb)
   node3-el   Swap node3 EL: besu 24.10.0 -> latest         (before Electra)
   node1-cl   Swap node1 CL: lighthouse v5.3.0 -> latest    (AT Electra boundary)
   node1      Swap all node1 components (node1-el + node1-cl)
@@ -68,8 +71,9 @@ Swap targets:
   node3      Alias for node3-el
   all        Swap all swappable components in order
 
-Note: lighthouse latest has a pre-Electra attestation format bug, so the CL
-swap must happen right at the Electra fork boundary. The daemon handles this
+Note: node2 CL (lodestar latest) needs no swap — it supports all forks.
+Lighthouse latest has a pre-Electra attestation format bug, so the CL swap
+must happen right at the Electra fork boundary. The daemon handles this
 with slot-level precision.
 
 Examples:
@@ -95,7 +99,6 @@ load_config() {
 
     EL_IMAGE_NEW_GETH=$(read_config "el_image_new_geth")
     EL_IMAGE_NEW_BESU=$(read_config "el_image_new_besu")
-    EL_IMAGE_NEW_NETHERMIND=$(read_config "el_image_nethermind")
     CL_IMAGE_LIGHTHOUSE=$(read_config "cl_image_lighthouse")
 
     CAPELLA_EPOCH=$(read_config "capella_fork_epoch")
@@ -105,13 +108,17 @@ load_config() {
     SLOTS_PER_EPOCH=$(read_config "slots_per_epoch")
     SECONDS_PER_SLOT=$(read_config "seconds_per_slot")
 
-    # Compute swap target epochs:
-    #   node1-el: midpoint of [Capella, Deneb)
-    SWAP_NODE1_EL_EPOCH=$(( CAPELLA_EPOCH + (DENEB_EPOCH - CAPELLA_EPOCH) / 2 ))
-    #   node2-el: first third of [Deneb, Electra)
-    SWAP_NODE2_EL_EPOCH=$(( DENEB_EPOCH + (ELECTRA_EPOCH - DENEB_EPOCH) / 3 ))
-    #   node3-el: second third of [Deneb, Electra)
-    SWAP_NODE3_EL_EPOCH=$(( DENEB_EPOCH + 2 * (ELECTRA_EPOCH - DENEB_EPOCH) / 3 ))
+    # Compute swap target epochs (staggered within each window):
+    #   node1-el: first third of [Capella, Deneb)
+    SWAP_NODE1_EL_EPOCH=$(( CAPELLA_EPOCH + (DENEB_EPOCH - CAPELLA_EPOCH) / 3 ))
+    # Ensure at least capella epoch
+    if [ "$SWAP_NODE1_EL_EPOCH" -lt "$CAPELLA_EPOCH" ]; then SWAP_NODE1_EL_EPOCH=$CAPELLA_EPOCH; fi
+    #   node2-el: second third of [Capella, Deneb)
+    SWAP_NODE2_EL_EPOCH=$(( CAPELLA_EPOCH + 2 * (DENEB_EPOCH - CAPELLA_EPOCH) / 3 ))
+    if [ "$SWAP_NODE2_EL_EPOCH" -le "$SWAP_NODE1_EL_EPOCH" ]; then SWAP_NODE2_EL_EPOCH=$((SWAP_NODE1_EL_EPOCH)); fi
+    #   node3-el: midpoint of [Deneb, Electra)
+    SWAP_NODE3_EL_EPOCH=$(( DENEB_EPOCH + (ELECTRA_EPOCH - DENEB_EPOCH) / 2 ))
+    if [ "$SWAP_NODE3_EL_EPOCH" -lt "$DENEB_EPOCH" ]; then SWAP_NODE3_EL_EPOCH=$DENEB_EPOCH; fi
     #   node1-cl: AT the Electra boundary (slot-precise in daemon mode)
     #     lighthouse latest has pre-Electra attestation format bug, so we swap
     #     as late as possible — stop old lighthouse ~2 min before Electra so
@@ -146,8 +153,7 @@ pull_swap_images() {
     local images=()
     for t in "${targets[@]}"; do
         case "$t" in
-            node1-el) images+=("$EL_IMAGE_NEW_GETH") ;;
-            node2-el) images+=("$EL_IMAGE_NEW_NETHERMIND") ;;
+            node1-el|node2-el) images+=("$EL_IMAGE_NEW_GETH") ;;
             node1-cl) images+=("$CL_IMAGE_LIGHTHOUSE") ;;
             node3-el) images+=("$EL_IMAGE_NEW_BESU") ;;
         esac
@@ -234,7 +240,7 @@ check_el_peers() {
 # Get the current head slot from any responsive CL beacon node
 get_current_slot() {
     local endpoints=(
-        "http://${NODE2_CL_IP}:5051"    # Teku (always running, never swapped)
+        "http://${NODE2_CL_IP}:5051"    # Lodestar (always running, never swapped)
         "http://${NODE3_CL_IP}:3500"    # Prysm (CL never swapped)
         "http://${NODE1_CL_IP}:5052"    # Lighthouse (may be down during CL swap)
     )
@@ -265,9 +271,9 @@ get_current_epoch() {
 # Get the finalized epoch
 get_finalized_epoch() {
     local endpoints=(
-        "http://${NODE2_CL_IP}:5051"
-        "http://${NODE3_CL_IP}:3500"
-        "http://${NODE1_CL_IP}:5052"
+        "http://${NODE2_CL_IP}:5051"    # Lodestar
+        "http://${NODE3_CL_IP}:3500"    # Prysm
+        "http://${NODE1_CL_IP}:5052"    # Lighthouse
     )
 
     for ep in "${endpoints[@]}"; do
@@ -334,8 +340,8 @@ swap_node1_el() {
     log "  Node 1 EL swap complete."
 }
 
-# Node2 EL: nethermind 1.25.4 -> latest
-# Only the EL container is restarted. Teku CL stays running and reconnects.
+# Node2 EL: geth v1.11.6 -> latest
+# Only the EL container is restarted. Lodestar CL stays running and reconnects.
 swap_node2_el() {
     if is_swapped "node2-el"; then
         log "  node2-el already swapped -- skipping."
@@ -343,55 +349,56 @@ swap_node2_el() {
     fi
 
     log ""
-    log "=== Swapping Node 2 EL: nethermind old -> new ==="
-    log "  Teku CL stays running -- only EL swap."
+    log "=== Swapping Node 2 EL: geth old -> new ==="
+    log "  Lodestar CL stays running -- only EL swap."
 
-    # Stop old nethermind
-    log "  Stopping old nethermind..."
+    # Stop old geth
+    log "  Stopping old geth..."
     docker stop -t 30 "${CONTAINER_PREFIX}-node2-el" >/dev/null 2>&1 || true
     docker rm -f "${CONTAINER_PREFIX}-node2-el" >/dev/null 2>&1 || true
 
-    # Build EL static peers list from running nodes
-    local node1_enode node3_enode nm_peer_list=""
+    # Build bootnode list
+    local node1_enode node3_enode bootnode_list=""
     node1_enode=$(get_node1_enode)
     node3_enode=$(get_node3_enode)
     if [ -n "$node1_enode" ]; then
-        nm_peer_list="$node1_enode"
+        bootnode_list="$node1_enode"
     fi
     if [ -n "$node3_enode" ]; then
-        if [ -n "$nm_peer_list" ]; then
-            nm_peer_list="$nm_peer_list,$node3_enode"
+        if [ -n "$bootnode_list" ]; then
+            bootnode_list="$bootnode_list,$node3_enode"
         else
-            nm_peer_list="$node3_enode"
+            bootnode_list="$node3_enode"
         fi
     fi
-    local nm_static_peers=""
-    if [ -n "$nm_peer_list" ]; then
-        nm_static_peers="--Network.StaticPeers=$nm_peer_list"
+    local geth_bootnodes=""
+    if [ -n "$bootnode_list" ]; then
+        geth_bootnodes="--bootnodes=$bootnode_list"
     fi
 
-    # Start new nethermind (same datadir)
-    log "  Starting new nethermind (${EL_IMAGE_NEW_NETHERMIND})..."
+    # Start new geth (same datadir, no mining)
+    log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node2-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE2_EL_IP" \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$DATA_DIR/node2/el:/data" \
-        -v "$GENERATED_DIR/el/nethermind-genesis.json:/genesis.json" \
         -v "$JWT_SECRET:/jwt" \
         -p 8546:8545 -p 8552:8551 -p 30304:30303 -p 30304:30303/udp \
-        "$EL_IMAGE_NEW_NETHERMIND" \
-        --datadir=/data \
-        --Init.ChainSpecPath=/genesis.json \
-        --Merge.Enabled=false \
-        --Sync.FastSync=false \
-        --Sync.SnapSync=false \
-        --JsonRpc.Enabled=true --JsonRpc.Host=0.0.0.0 --JsonRpc.Port=8545 \
-        --JsonRpc.EngineHost=0.0.0.0 --JsonRpc.EnginePort=8551 \
-        --JsonRpc.JwtSecretFile=/jwt \
-        --JsonRpc.EnabledModules="Eth,Net,Web3,Admin,Debug,Trace,TxPool" \
-        --Network.DiscoveryPort=30303 --Network.P2PPort=30303 \
-        $nm_static_peers
+        "$EL_IMAGE_NEW_GETH" \
+        --datadir /data \
+        --networkid "$CHAIN_ID" \
+        --miner.gasprice=1 \
+        --http --http.addr=0.0.0.0 --http.port=8545 \
+        --http.api=eth,net,web3,debug,trace,admin,txpool \
+        --http.corsdomain="*" --http.vhosts="*" \
+        --authrpc.addr=0.0.0.0 --authrpc.port=8551 \
+        --authrpc.jwtsecret=/jwt \
+        --authrpc.vhosts="*" \
+        --port=30303 \
+        --verbosity=3 \
+        --syncmode=full \
+        $geth_bootnodes
 
     wait_for_el "$NODE2_EL_IP" "node2"
     check_el_peers "$NODE2_EL_IP" "node2"
@@ -559,7 +566,7 @@ cmd_status() {
                 swap_desc="daemon target: epoch $SWAP_NODE1_EL_EPOCH, deadline: epoch $deadline_epoch"
                 ;;
             node2-el)
-                deadline_epoch=$ELECTRA_EPOCH
+                deadline_epoch=$DENEB_EPOCH
                 swap_desc="daemon target: epoch $SWAP_NODE2_EL_EPOCH, deadline: epoch $deadline_epoch"
                 ;;
             node3-el)
@@ -584,7 +591,7 @@ cmd_status() {
 
         case "$target" in
             node1-el) log "  node1-el  geth v1.11.6 -> latest           $status_str" ;;
-            node2-el) log "  node2-el  nethermind 1.25.4 -> latest      $status_str" ;;
+            node2-el) log "  node2-el  geth v1.11.6 -> latest           $status_str" ;;
             node3-el) log "  node3-el  besu 24.10.0 -> latest           $status_str" ;;
             node1-cl) log "  node1-cl  lighthouse v5.3.0 -> latest      $status_str" ;;
         esac
@@ -598,7 +605,7 @@ cmd_daemon() {
     log ""
     log "Swap schedule (auto-computed from fork epochs):"
     log "  node1-el  geth old -> new         at epoch $SWAP_NODE1_EL_EPOCH  (before Deneb @ $DENEB_EPOCH)"
-    log "  node2-el  nethermind old -> new   at epoch $SWAP_NODE2_EL_EPOCH  (before Electra @ $ELECTRA_EPOCH)"
+    log "  node2-el  geth old -> new         at epoch $SWAP_NODE2_EL_EPOCH  (before Deneb @ $DENEB_EPOCH)"
     log "  node3-el  besu old -> new         at epoch $SWAP_NODE3_EL_EPOCH  (before Electra @ $ELECTRA_EPOCH)"
     log "  node1-cl  lighthouse old -> new   ~${SWAP_NODE1_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE1_CL_LEAD_SLOTS)))"
     log ""
@@ -796,10 +803,10 @@ cmd_swap() {
     log "=== Swap Complete ==="
     for target in "${ordered[@]}"; do
         case "$target" in
-            node1-el) log "  node1-el: geth -> ${EL_IMAGE_NEW_GETH}  [EL:8545]" ;;
-            node2-el) log "  node2-el: nethermind -> ${EL_IMAGE_NEW_NETHERMIND}  [EL:8546]" ;;
-            node1-cl) log "  node1-cl: lighthouse -> ${CL_IMAGE_LIGHTHOUSE}  [CL:5052]" ;;
-            node3-el) log "  node3-el: besu -> ${EL_IMAGE_NEW_BESU}  [EL:8547]" ;;
+            node1-el) log "  node1-el: geth v1.11.6 -> ${EL_IMAGE_NEW_GETH}  [EL:8545]" ;;
+            node2-el) log "  node2-el: geth v1.11.6 -> ${EL_IMAGE_NEW_GETH}  [EL:8546]" ;;
+            node1-cl) log "  node1-cl: lighthouse v5.3.0 -> ${CL_IMAGE_LIGHTHOUSE}  [CL:5052]" ;;
+            node3-el) log "  node3-el: besu 24.10.0 -> ${EL_IMAGE_NEW_BESU}  [EL:8547]" ;;
         esac
     done
 }

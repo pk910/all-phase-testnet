@@ -25,6 +25,9 @@ for arg in "$@"; do
     esac
 done
 
+# Stop extra miners if any
+bash "$PROJECT_DIR/scripts/03_extra_miner.sh" stop all 2>/dev/null || true
+
 # Delegate stop to the main script
 bash "$PROJECT_DIR/scripts/01_start_network.sh" stop
 

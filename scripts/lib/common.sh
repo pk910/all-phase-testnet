@@ -103,7 +103,7 @@ containers_for_component() {
     local component="$1"
     case "$component" in
         node1) echo "${CONTAINER_PREFIX}-node1-el ${CONTAINER_PREFIX}-node1-cl ${CONTAINER_PREFIX}-node1-vc" ;;
-        node2) echo "${CONTAINER_PREFIX}-node2-el ${CONTAINER_PREFIX}-node2-cl" ;;
+        node2) echo "${CONTAINER_PREFIX}-node2-el ${CONTAINER_PREFIX}-node2-cl ${CONTAINER_PREFIX}-node2-vc" ;;
         node3) echo "${CONTAINER_PREFIX}-node3-el ${CONTAINER_PREFIX}-node3-cl ${CONTAINER_PREFIX}-node3-vc" ;;
         dora) echo "${CONTAINER_PREFIX}-dora" ;;
         spamoor) echo "${CONTAINER_PREFIX}-spamoor" ;;

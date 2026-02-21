@@ -16,9 +16,9 @@ Actions:
   stop    Stop components
 
 Components:
-  node1       Geth (mining) + Lighthouse + Lighthouse VC
-  node2       Nethermind (sync) + Teku (BN+VC)
-  node3       Besu (mining) + Prysm + Prysm VC
+  node1       Geth v1.11.6 (mining) + Lighthouse v5.3.0 + Lighthouse VC
+  node2       Geth v1.11.6 (sync) + Lodestar + Lodestar VC
+  node3       Besu 24.10.0 (mining) + Prysm + Prysm VC
   dora        Dora block explorer
   spamoor     Spamoor transaction spammer
   blockscout  Blockscout explorer (postgres + verifier + backend + frontend)
@@ -91,11 +91,9 @@ load_config() {
 
     EL_IMAGE_GETH=$(read_config "el_image_old_geth")
     EL_IMAGE_BESU=$(read_config "el_image_old_besu")
-    EL_IMAGE_OLD_NETHERMIND=$(read_config "el_image_old_nethermind")
-    EL_IMAGE_NETHERMIND=$(read_config "el_image_nethermind")
     CL_IMAGE_OLD_LIGHTHOUSE=$(read_config "cl_image_old_lighthouse")
     CL_IMAGE_LIGHTHOUSE=$(read_config "cl_image_lighthouse")
-    CL_IMAGE_TEKU=$(read_config "cl_image_teku")
+    CL_IMAGE_LODESTAR=$(read_config "cl_image_lodestar")
     CL_IMAGE_PRYSM_BEACON=$(read_config "cl_image_prysm_beacon")
     CL_IMAGE_PRYSM_VALIDATOR=$(read_config "cl_image_prysm_validator")
     DORA_IMAGE=$(read_config "dora_image")
@@ -116,7 +114,7 @@ pull_images() {
     for c in "${COMPONENTS[@]}"; do
         case "$c" in
             node1) images+=("$EL_IMAGE_GETH" "$CL_IMAGE_OLD_LIGHTHOUSE") ;;
-            node2) images+=("$EL_IMAGE_OLD_NETHERMIND" "$CL_IMAGE_TEKU") ;;
+            node2) images+=("$EL_IMAGE_GETH" "$CL_IMAGE_LODESTAR") ;;
             node3) images+=("$EL_IMAGE_BESU" "$CL_IMAGE_PRYSM_BEACON" "$CL_IMAGE_PRYSM_VALIDATOR") ;;
             dora) images+=("$DORA_IMAGE") ;;
             spamoor) images+=("$SPAMOOR_IMAGE") ;;
@@ -352,88 +350,96 @@ start_node3() {
 }
 
 start_node2() {
-    log "Starting Node 2: Nethermind (sync) + Teku..."
+    log "Starting Node 2: Geth (sync) + Lodestar..."
 
     # Clean & prepare data dirs
     docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf /hostdata/node2 2>/dev/null || true
-    mkdir -p "$DATA_DIR/node2/el" "$DATA_DIR/node2/cl"
+    mkdir -p "$DATA_DIR/node2/el" "$DATA_DIR/node2/cl" "$DATA_DIR/node2/vc"
 
     # Stop any existing containers
     stop_component node2
 
-    # Build EL static peers list from running nodes
-    local node1_enode node3_enode nm_peer_list=""
+    # Build EL bootnode list from running nodes
+    local node1_enode node3_enode geth_bootnodes=""
     node1_enode=$(get_node1_enode)
     node3_enode=$(get_node3_enode)
 
+    local bootnode_list=""
     if [ -n "$node1_enode" ]; then
-        nm_peer_list="$node1_enode"
+        bootnode_list="$node1_enode"
         log "  Node1 enode: $node1_enode"
     fi
     if [ -n "$node3_enode" ]; then
-        if [ -n "$nm_peer_list" ]; then
-            nm_peer_list="$nm_peer_list,$node3_enode"
+        if [ -n "$bootnode_list" ]; then
+            bootnode_list="$bootnode_list,$node3_enode"
         else
-            nm_peer_list="$node3_enode"
+            bootnode_list="$node3_enode"
         fi
         log "  Node3 enode: $node3_enode"
     fi
 
-    local nm_static_peers=""
-    if [ -n "$nm_peer_list" ]; then
-        nm_static_peers="--Network.StaticPeers=$nm_peer_list"
+    if [ -n "$bootnode_list" ]; then
+        geth_bootnodes="--bootnodes=$bootnode_list"
     fi
 
-    # Nethermind
-    log "  Starting nethermind..."
+    # Geth init
+    log "  Initializing geth datadir..."
+    docker run --rm \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
+        -v "$DATA_DIR/node2/el:/data" \
+        "$EL_IMAGE_GETH" \
+        --datadir /data init /genesis.json 2>&1 | tail -5
+
+    # Geth run (sync only, no mining)
+    log "  Starting geth (sync)..."
     docker run -d --name "${CONTAINER_PREFIX}-node2-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE2_EL_IP" \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$DATA_DIR/node2/el:/data" \
-        -v "$GENERATED_DIR/el/nethermind-genesis.json:/genesis.json" \
         -v "$JWT_SECRET:/jwt" \
         -p 8546:8545 -p 8552:8551 -p 30304:30303 -p 30304:30303/udp \
-        "$EL_IMAGE_OLD_NETHERMIND" \
-        --datadir=/data \
-        --Init.ChainSpecPath=/genesis.json \
-        --Sync.FastSync=false \
-        --Sync.SnapSync=false \
-        --JsonRpc.Enabled=true --JsonRpc.Host=0.0.0.0 --JsonRpc.Port=8545 \
-        --JsonRpc.EngineHost=0.0.0.0 --JsonRpc.EnginePort=8551 \
-        --JsonRpc.JwtSecretFile=/jwt \
-        --JsonRpc.EnabledModules="Eth,Net,Web3,Admin,Debug,Trace,TxPool" \
-        --Network.DiscoveryPort=30303 --Network.P2PPort=30303 \
-        $nm_static_peers
+        "$EL_IMAGE_GETH" \
+        --datadir /data \
+        --networkid "$CHAIN_ID" \
+        --miner.gasprice=1 \
+        --http --http.addr=0.0.0.0 --http.port=8545 \
+        --http.api=eth,net,web3,debug,trace,admin,txpool \
+        --http.corsdomain="*" --http.vhosts="*" \
+        --authrpc.addr=0.0.0.0 --authrpc.port=8551 \
+        --authrpc.jwtsecret=/jwt \
+        --authrpc.vhosts="*" \
+        --port=30303 \
+        --verbosity=3 \
+        --syncmode=full \
+        $geth_bootnodes
 
-    log "  Nethermind container: ${CONTAINER_PREFIX}-node2-el"
-    sleep 5
+    log "  Geth container: ${CONTAINER_PREFIX}-node2-el"
+    sleep 3
 
-    # Get CL multiaddrs for Teku static peers
-    local node1_multiaddr node3_multiaddr teku_static_list=""
-    node1_multiaddr=$(curl -s "http://${NODE1_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.p2p_addresses[0]' || echo "")
-    node3_multiaddr=$(curl -s "http://${NODE3_CL_IP}:3500/eth/v1/node/identity" 2>/dev/null | jq -r '.data.p2p_addresses[0]' || echo "")
+    # Get CL ENRs for Lodestar bootnodes
+    local node1_cl_enr node3_cl_enr lodestar_bootnodes=""
+    node1_cl_enr=$(curl -s "http://${NODE1_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    node3_cl_enr=$(curl -s "http://${NODE3_CL_IP}:3500/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
 
-    if [ -n "$node1_multiaddr" ] && [ "$node1_multiaddr" != "null" ]; then
-        teku_static_list="$node1_multiaddr"
-        log "  Lighthouse multiaddr: $node1_multiaddr"
+    local bootnode_args=""
+    if [ -n "$node1_cl_enr" ] && [ "$node1_cl_enr" != "null" ]; then
+        bootnode_args="--bootnodes=$node1_cl_enr"
+        log "  Lighthouse ENR: ${node1_cl_enr:0:40}..."
     fi
-    if [ -n "$node3_multiaddr" ] && [ "$node3_multiaddr" != "null" ]; then
-        if [ -n "$teku_static_list" ]; then
-            teku_static_list="$teku_static_list,$node3_multiaddr"
+    if [ -n "$node3_cl_enr" ] && [ "$node3_cl_enr" != "null" ]; then
+        if [ -n "$bootnode_args" ]; then
+            bootnode_args="$bootnode_args --bootnodes=$node3_cl_enr"
         else
-            teku_static_list="$node3_multiaddr"
+            bootnode_args="--bootnodes=$node3_cl_enr"
         fi
-        log "  Prysm multiaddr: $node3_multiaddr"
+        log "  Prysm ENR: ${node3_cl_enr:0:40}..."
     fi
 
-    local teku_static_peers=""
-    if [ -n "$teku_static_list" ]; then
-        teku_static_peers="--p2p-static-peers=$teku_static_list"
-    fi
-
-    # Teku beacon + validator (combined)
-    log "  Starting teku..."
+    # Lodestar beacon
+    log "  Starting lodestar beacon..."
     docker run -d --name "${CONTAINER_PREFIX}-node2-cl" \
         --network "$DOCKER_NETWORK" --ip "$NODE2_CL_IP" \
         -u "$DOCKER_UID" \
@@ -441,27 +447,49 @@ start_node2() {
         -v "$DATA_DIR/node2/cl:/data" \
         -v "$GENERATED_DIR/cl:/cl-config" \
         -v "$JWT_SECRET:/jwt" \
-        -v "$GENERATED_DIR/keys/node2/teku-keys:/teku-keys" \
-        -v "$GENERATED_DIR/keys/node2/teku-secrets:/teku-secrets" \
         -p 5053:5051 -p 9001:9000 -p 9001:9000/udp \
-        "$CL_IMAGE_TEKU" \
-        --network=/cl-config/config.yaml \
-        --initial-state=/cl-config/genesis.ssz \
-        --data-path=/data \
-        --ee-endpoint="http://${CONTAINER_PREFIX}-node2-el:8551" \
-        --ee-jwt-secret-file=/jwt \
-        --rest-api-enabled --rest-api-interface=0.0.0.0 --rest-api-port=5051 \
-        --rest-api-host-allowlist="*" \
-        --log-destination=CONSOLE \
-        --p2p-port=9000 \
-        --p2p-peer-lower-bound=1 \
-        --p2p-advertised-ip="$NODE2_CL_IP" \
-        --validator-keys=/teku-keys:/teku-secrets \
-        --validators-proposer-default-fee-recipient="$ETHERBASE" \
-        --p2p-subscribe-all-subnets-enabled=true \
-        $teku_static_peers
+        "$CL_IMAGE_LODESTAR" \
+        beacon \
+        --network.connectToDiscv5Bootnodes \
+        --dataDir=/data \
+        --paramsFile=/cl-config/config.yaml \
+        --genesisStateFile=/cl-config/genesis.ssz \
+        --execution.urls="http://${CONTAINER_PREFIX}-node2-el:8551" \
+        --jwt-secret=/jwt \
+        --rest \
+        --rest.address=0.0.0.0 \
+        --rest.port=5051 \
+        --rest.cors="*" \
+        --port=9000 \
+        --enr.ip="$NODE2_CL_IP" \
+        --enr.tcp=9000 \
+        --enr.udp=9000 \
+        --targetPeers=2 \
+        --suggestedFeeRecipient="$ETHERBASE" \
+        --subscribeAllSubnets \
+        $bootnode_args
 
-    log "  Teku container: ${CONTAINER_PREFIX}-node2-cl"
+    log "  Lodestar container: ${CONTAINER_PREFIX}-node2-cl"
+
+    # Lodestar validator
+    log "  Starting lodestar validator..."
+    docker run -d --name "${CONTAINER_PREFIX}-node2-vc" \
+        --network "$DOCKER_NETWORK" \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$DATA_DIR/node2/vc:/data" \
+        -v "$GENERATED_DIR/cl:/cl-config" \
+        -v "$GENERATED_DIR/keys/node2:/keys" \
+        "$CL_IMAGE_LODESTAR" \
+        validator \
+        --dataDir=/data \
+        --paramsFile=/cl-config/config.yaml \
+        --beaconNodes="http://${CONTAINER_PREFIX}-node2-cl:5051" \
+        --keystoresDir=/keys/keys \
+        --secretsDir=/keys/secrets \
+        --suggestedFeeRecipient="$ETHERBASE"
+
+    log "  Lodestar VC container: ${CONTAINER_PREFIX}-node2-vc"
 }
 
 start_dora() {
@@ -546,13 +574,13 @@ start_blockscout() {
         "$BLOCKSCOUT_VERIF_IMAGE"
 
     # 3. Backend (indexer + API)
-    # Use Nethermind (node2) for indexing - old geth v1.11.6 lacks eth_getBlockReceipts
+    # Use node2 (geth latest) for indexing - old geth v1.11.6 lacks eth_getBlockReceipts
     log "  Starting blockscout backend..."
     docker run -d --name "${CONTAINER_PREFIX}-blockscout" \
         --network "$DOCKER_NETWORK" --ip "$BLOCKSCOUT_BACKEND_IP" \
         -v "$DATA_DIR/blockscout:/app/logs" \
         -p 4000:4000 \
-        -e ETHEREUM_JSONRPC_VARIANT=nethermind \
+        -e ETHEREUM_JSONRPC_VARIANT=geth \
         -e ETHEREUM_JSONRPC_HTTP_URL="http://${CONTAINER_PREFIX}-node2-el:8545/" \
         -e ETHEREUM_JSONRPC_TRACE_URL="http://${CONTAINER_PREFIX}-node2-el:8545/" \
         -e DATABASE_URL="postgresql://blockscout:blockscout@${CONTAINER_PREFIX}-blockscout-db:5432/blockscout" \
@@ -649,9 +677,9 @@ log ""
 log "=== Started: ${ORDERED[*]} ==="
 for component in "${ORDERED[@]}"; do
     case "$component" in
-        node1) log "  Node 1: Geth (mining)    + Lighthouse  [EL:8545 CL:5052]" ;;
-        node2) log "  Node 2: Nethermind (sync) + Teku       [EL:8546 CL:5053]" ;;
-        node3) log "  Node 3: Besu (mining)    + Prysm       [EL:8547 CL:5054]" ;;
+        node1) log "  Node 1: Geth v1.11.6 (mining) + Lighthouse v5.3.0  [EL:8545 CL:5052]" ;;
+        node2) log "  Node 2: Geth v1.11.6 (sync)   + Lodestar           [EL:8546 CL:5053]" ;;
+        node3) log "  Node 3: Besu 24.10.0 (mining) + Prysm             [EL:8547 CL:5054]" ;;
         dora) log "  Dora explorer:                          [http://localhost:8090]" ;;
         spamoor) log "  Spamoor:                                [http://localhost:8091]" ;;
         blockscout) log "  Blockscout:                             [http://localhost:3000] (API: http://localhost:4000)" ;;
