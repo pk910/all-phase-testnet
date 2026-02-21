@@ -2,22 +2,22 @@
 
 A local Ethereum testnet that starts as two separate chains (PoW mining + Phase0 beacon chain) and progressively upgrades through every Ethereum fork:
 
-**Phase0 -> Altair -> Bellatrix (Merge) -> Capella/Shanghai -> Deneb/Cancun -> Electra/Prague -> Fulu/Osaka**
+**Phase0 -> Altair -> Bellatrix (Merge) -> Capella/Shanghai -> Deneb/Cancun -> Electra/Prague -> Fulu/Osaka -> BPO1 -> BPO2**
 
-Each node begins with older client versions that support PoW mining and the Merge, then swaps to latest versions at the correct fork boundaries. This exercises the full fork progression and client diversity.
+Each node begins with older client versions that support PoW mining and the Merge, then swaps to latest versions at the correct fork boundaries. This exercises the full fork progression, client diversity, and post-PeerDAS blob parameter overrides.
 
 ## Architecture
 
 | Node | Execution Client | Consensus Client | Role |
 |------|-----------------|-----------------|------|
-| 1 | Geth v1.11.6 -> latest | Lighthouse v5.3.0 -> latest | PoW miner, 128 validators |
-| 2 | Geth v1.11.6 -> latest | Lodestar (latest) | Sync only, 128 validators |
+| 1 | Geth v1.11.6 -> latest | Lighthouse v5.3.0 -> v6.0.0 -> latest | PoW miner, 128 validators |
+| 2 | Geth v1.11.6 -> latest | Lodestar v1.38.0 -> latest | Sync only, 128 validators |
 | 3 | Besu 24.10.0 -> latest | Prysm (latest) | PoW miner, 128 validators |
 
 Plus:
 - [Dora](https://github.com/ethpandaops/dora) block explorer (CL-focused)
 - [Blockscout](https://github.com/blockscout/blockscout) block explorer (EL-focused, full transaction/contract indexing)
-- [Spamoor](https://github.com/ethpandaops/spamoor) transaction spammer with web UI
+- [Spamoor](https://github.com/ethpandaops/spamoor) transaction spammer with web UI and configurable startup spammers
 
 ### Client Swap Schedule
 
@@ -27,10 +27,12 @@ The swap daemon automatically upgrades clients at the correct fork boundaries:
 |------|-----------|--------|--------|
 | node1-el | geth v1.11.6 -> latest | Before Deneb | Old geth lacks Cancun/Engine API V3 |
 | node2-el | geth v1.11.6 -> latest | Before Deneb | Same as node1 |
-| node3-el | besu 24.10.0 -> latest | Before Electra | Old besu has experimental Prague support |
-| node1-cl | lighthouse v5.3.0 -> latest | AT Electra | v5.3.0 lacks Electra; latest has pre-Electra attestation bug |
+| node1-cl-mid | lighthouse v5.3.0 -> v6.0.0 | Before Deneb | DB migration (schema v21->v22) + v5.3.0 lacks Deneb |
+| node3-el | besu 24.10.0 -> latest | Before Electra | Old besu has experimental Prague Engine API V4 |
+| node2-cl | lodestar v1.38.0 -> latest | AT Electra | v1.38.0 lacks Electra; latest dropped pre-Electra block production |
+| node1-cl | lighthouse v6.0.0 -> latest | AT Electra | v6.0.0 lacks Electra; latest has pre-Electra attestation bug |
 
-Node 2 CL (Lodestar) and Node 3 CL (Prysm) support all forks and don't need swapping.
+Node 3 CL (Prysm latest) supports all forks and doesn't need swapping.
 
 ### Default Fork Schedule
 
@@ -38,14 +40,16 @@ Node 2 CL (Lodestar) and Node 3 CL (Prysm) support all forks and don't need swap
 |------|-------|-------------------|
 | Phase0 | 0 | 0 min |
 | Altair | 1 | ~6 min |
-| Bellatrix | 3 | ~19 min |
-| **Merge** | ~4 | ~25 min |
-| Capella/Shanghai | 5 | ~32 min |
-| Deneb/Cancun | 6 | ~38 min |
-| Electra/Prague | 7 | ~45 min |
-| **Fulu/Osaka** | 8 | ~51 min |
+| Bellatrix | 2 | ~13 min |
+| **Merge** | ~3 | ~19 min |
+| Capella/Shanghai | 4 | ~26 min |
+| Deneb/Cancun | 5 | ~32 min |
+| Electra/Prague | 6 | ~38 min |
+| Fulu/Osaka | 7 | ~45 min |
+| BPO1 (max_blobs=15) | 8 | ~51 min |
+| BPO2 (max_blobs=30) | 9 | ~58 min |
 
-Times are approximate (include 2 min genesis delay). A stable Fulu chain should be running ~55 minutes after start.
+Times are approximate (include 2 min genesis delay). A stable Fulu+BPO chain should be running ~60 minutes after start.
 
 ## Prerequisites
 
@@ -65,7 +69,7 @@ bash quickstart.sh
 This runs all steps automatically:
 1. Generates genesis (EL + CL + keystores)
 2. Starts all 3 nodes + Dora + Spamoor + Blockscout
-3. Starts extra PoW miners at bellatrix and stops them after the merge
+3. Starts extra PoW miners before bellatrix and stops them after the merge
 4. Launches the swap daemon in tmux/screen
 
 ### Manual Steps
@@ -157,13 +161,31 @@ Key parameters:
 | `genesis_delay` | 120 | Seconds between genesis generation and CL start |
 | `genesis_difficulty` | 0x80000 | Initial PoW difficulty |
 | `validators_per_node` | 128 | Validators per node (384 total) |
-| `bellatrix_fork_epoch` | 3 | Bellatrix activation |
-| `capella_fork_epoch` | 5 | Capella activation |
-| `deneb_fork_epoch` | 6 | Deneb activation |
-| `electra_fork_epoch` | 7 | Electra activation |
-| `fulu_fork_epoch` | 8 | Fulu activation |
+| `bellatrix_fork_epoch` | 2 | Bellatrix activation |
+| `capella_fork_epoch` | 4 | Capella activation |
+| `deneb_fork_epoch` | 5 | Deneb activation |
+| `electra_fork_epoch` | 6 | Electra activation |
+| `fulu_fork_epoch` | 7 | Fulu activation |
+| `bpo1_fork_epoch` | 8 | BPO1: max_blobs increased to 15 |
+| `bpo2_fork_epoch` | 9 | BPO2: max_blobs increased to 30 |
 
 TTD (Terminal Total Difficulty) is auto-calculated to target the merge ~1 epoch after Bellatrix. Override with `terminal_total_difficulty` if needed.
+
+### Startup Spammers
+
+Spamoor supports automatic startup spammers configured in `genesis-config.yaml`:
+
+```yaml
+spamoor_startup_spammers:
+  - name: "EOA Spammer"
+    scenario: "eoatx"
+    config:
+      throughput: 20
+      max_pending: 40
+      max_wallets: 20
+```
+
+By default, an EOA transaction spammer with throughput 20 is configured. The config is passed to spamoor via `--startup-spammer` and starts automatically when spamoor launches.
 
 ## Directory Structure
 
@@ -192,7 +214,10 @@ all-phase-testnet/
 
 ## Known Issues
 
-- **Lighthouse latest** has a pre-Electra attestation format bug (gossipsub). It cannot operate correctly before the Electra fork, which is why node1 CL must swap from v5.3.0 to latest precisely at the Electra boundary.
+- **Lighthouse v5.3.0 -> latest requires 2-step upgrade**: v5.3.0 uses DB schema v21 which cannot be read by v8.x directly (`InvalidVersionByte` error). v6.0.0 bridges the migration (schema v21->v22). The swap daemon handles this automatically via the `node1-cl-mid` step.
+- **Lighthouse latest** has a pre-Electra attestation format bug (gossipsub). It cannot operate correctly before the Electra fork, which is why node1 CL must swap from v6.0.0 to latest precisely at the Electra boundary.
+- **Lodestar latest** dropped pre-Electra block production. It cannot produce blocks before the Electra fork, constraining the node2 CL swap to happen at the Electra boundary.
+- **Besu 24.10.0** has a BONSAI parallel transaction processing bug that can cause world state root mismatches on competing blocks (issue [#7844](https://github.com/hyperledger/besu/issues/7844)). This is mitigated by passing `--Xbonsai-parallel-tx-processing-enabled=false`.
 - **Nethermind** has a hardcoded mainnet `FinalTotalDifficulty` that prevents private chain PoW sync after the merge. This is why node2 uses Geth instead of Nethermind.
 - **Teku latest** dropped TTD-based merge transition support entirely. Older versions have engine API compatibility issues. This is why node2 uses Lodestar instead of Teku.
-- **Extra miners** are recommended to speed up the PoW phase. With only 2 miners (node1 + node3), reaching TTD takes longer.
+- **Extra miners** are recommended to speed up the PoW phase. The quickstart script automatically manages miner lifecycle around the merge.
