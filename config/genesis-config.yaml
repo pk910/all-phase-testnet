@@ -20,7 +20,7 @@ electra_fork_epoch: 80
 fulu_fork_epoch: 100
 
 # PoW / Merge
-genesis_difficulty: "0x100000"
+genesis_difficulty: "0x20000"
 # terminal_total_difficulty: 820000  # optional: manual override; if omitted, auto-calculated
 
 # Validators (per node)
