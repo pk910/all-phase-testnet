@@ -53,8 +53,8 @@ cl_image_mid_lighthouse: "sigp/lighthouse:v6.0.0"   # intermediate for DB migrat
 cl_image_lighthouse: "sigp/lighthouse:latest"
 cl_image_old_lodestar: "chainsafe/lodestar:v1.38.0"
 cl_image_lodestar: "chainsafe/lodestar:latest"
-cl_image_prysm_beacon: "gcr.io/prysmaticlabs/prysm/beacon-chain:latest"
-cl_image_prysm_validator: "gcr.io/prysmaticlabs/prysm/validator:latest"
+cl_image_prysm_beacon: "gcr.io/prysmaticlabs/prysm/beacon-chain:v7.1.2"
+cl_image_prysm_validator: "gcr.io/prysmaticlabs/prysm/validator:v7.1.2"
 
 # Explorer
 dora_image: "ethpandaops/dora:latest"
