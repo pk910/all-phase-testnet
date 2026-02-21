@@ -26,7 +26,7 @@ for arg in "$@"; do
 done
 
 # Delegate stop to the main script
-bash "$SCRIPT_DIR/01_start_network.sh" stop
+bash "$PROJECT_DIR/scripts/01_start_network.sh" stop
 
 if [ "$CLEAN_DATA" = true ]; then
     log "Removing generated data..."
