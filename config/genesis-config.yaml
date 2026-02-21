@@ -12,8 +12,8 @@ seconds_per_slot: 12
 slots_per_epoch: 32
 
 # Fork schedule (CL epochs)
-altair_fork_epoch: 10
-bellatrix_fork_epoch: 20
+altair_fork_epoch: 1
+bellatrix_fork_epoch: 5
 capella_fork_epoch: 40
 deneb_fork_epoch: 60
 electra_fork_epoch: 80
@@ -21,7 +21,7 @@ fulu_fork_epoch: 100
 
 # PoW / Merge
 genesis_difficulty: "0x80000"
-# terminal_total_difficulty: 820000  # optional: manual override; if omitted, auto-calculated
+terminal_total_difficulty: 180000000  # targeting merge at ~epoch 6
 
 # Validators (per node)
 validators_per_node: 128
