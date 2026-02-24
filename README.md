@@ -8,11 +8,16 @@ Each node begins with older client versions that support PoW mining and the Merg
 
 ## Architecture
 
+4 nodes with client diversity. 512 validators total (128 per node), 12-second slots, 32 slots per epoch.
+
 | Node | Execution Client | Consensus Client | Role |
 |------|-----------------|-----------------|------|
 | 1 | Geth v1.11.6 -> latest | Lighthouse v5.3.0 -> v6.0.0 -> latest | PoW miner, 128 validators |
 | 2 | Geth v1.11.6 -> latest | Lodestar v1.38.0 -> latest | Sync only, 128 validators |
-| 3 | Besu 24.10.0 -> latest | Prysm (latest) | PoW miner, 128 validators |
+| 3 | Besu 24.10.0 -> latest | Prysm v7.1.2 (no swap) | PoW miner, 128 validators |
+| 4 | Geth v1.11.6 -> latest -> Reth | Teku (old -> latest) | 128 validators |
+
+**Planned (not yet added):** Node 5 with Nethermind + Grandine.
 
 Plus:
 - [Dora](https://github.com/ethpandaops/dora) block explorer (CL-focused)
@@ -21,18 +26,20 @@ Plus:
 
 ### Client Swap Schedule
 
-The swap daemon automatically upgrades clients at the correct fork boundaries:
+The swap daemon automatically upgrades clients at the correct fork boundaries. EL swaps happen around epochs 4-5 (before Deneb). CL swaps are staggered before Electra.
 
 | Swap | Old -> New | Window | Reason |
 |------|-----------|--------|--------|
 | node1-el | geth v1.11.6 -> latest | Before Deneb | Old geth lacks Cancun/Engine API V3 |
 | node2-el | geth v1.11.6 -> latest | Before Deneb | Same as node1 |
-| node1-cl-mid | lighthouse v5.3.0 -> v6.0.0 | Before Deneb | DB migration (schema v21->v22) + v5.3.0 lacks Deneb |
 | node3-el | besu 24.10.0 -> latest | Before Electra | Old besu has experimental Prague Engine API V4 |
+| node4-el | geth v1.11.6 -> latest -> Reth | Before Deneb / Before Fulu | Geth swap first, then Reth swap |
+| node1-cl-mid | lighthouse v5.3.0 -> v6.0.0 | Before Deneb | DB migration (schema v21->v22) + v5.3.0 lacks Deneb |
 | node2-cl | lodestar v1.38.0 -> latest | AT Electra | v1.38.0 lacks Electra; latest dropped pre-Electra block production |
 | node1-cl | lighthouse v6.0.0 -> latest | AT Electra | v6.0.0 lacks Electra; latest has pre-Electra attestation bug |
+| node4-cl | teku old -> latest | Before Electra | Old Teku lacks Electra support |
 
-Node 3 CL (Prysm latest) supports all forks and doesn't need swapping.
+Node 3 CL (Prysm v7.1.2) supports all forks and doesn't need swapping.
 
 ### Default Fork Schedule
 
@@ -51,6 +58,12 @@ Node 3 CL (Prysm latest) supports all forks and doesn't need swapping.
 
 Times are approximate (include 2 min genesis delay). A stable Fulu+BPO chain should be running ~60 minutes after start.
 
+### BlobSchedule
+
+Blob parameters are overridden via BlobSchedule at PeerDAS fork boundaries:
+- **Epoch 8 (BPO1):** max_blobs raised to 15
+- **Epoch 9 (BPO2):** max_blobs raised to 30
+
 ## Prerequisites
 
 - Docker
@@ -68,7 +81,7 @@ bash quickstart.sh
 
 This runs all steps automatically:
 1. Generates genesis (EL + CL + keystores)
-2. Starts all 3 nodes + Dora + Spamoor + Blockscout
+2. Starts all 4 nodes + Dora + Spamoor + Blockscout
 3. Starts extra PoW miners before bellatrix and stops them after the merge
 4. Launches the swap daemon in tmux/screen
 
@@ -145,9 +158,11 @@ bash scripts/99_cleanup.sh --data
 | Geth (node1) | 8545 | EL JSON-RPC |
 | Geth (node2) | 8546 | EL JSON-RPC |
 | Besu (node3) | 8547 | EL JSON-RPC |
+| Geth/Reth (node4) | 8548 | EL JSON-RPC |
 | Lighthouse (node1) | 5052 | CL Beacon API |
 | Lodestar (node2) | 5053 | CL Beacon API |
 | Prysm (node3) | 5054 | CL Beacon API |
+| Teku (node4) | 5055 | CL Beacon API |
 
 ## Configuration
 
@@ -160,7 +175,7 @@ Key parameters:
 | `chain_id` | 1337 | EL chain ID |
 | `genesis_delay` | 120 | Seconds between genesis generation and CL start |
 | `genesis_difficulty` | 0x80000 | Initial PoW difficulty |
-| `validators_per_node` | 128 | Validators per node (384 total) |
+| `validators_per_node` | 128 | Validators per node (512 total) |
 | `bellatrix_fork_epoch` | 2 | Bellatrix activation |
 | `capella_fork_epoch` | 4 | Capella activation |
 | `deneb_fork_epoch` | 5 | Deneb activation |
@@ -212,12 +227,22 @@ all-phase-testnet/
     data/                      # Runtime data (per node)
 ```
 
-## Known Issues
+## Known Issues and Fixes
+
+- **Geth swap (v1.11.6 -> latest):** Requires `--state.scheme=hash`. Without this flag, the latest Geth cannot read the state database written by v1.11.6, causing a state scheme mismatch on startup.
+
+- **Besu swap (24.10.0 -> latest):** Requires `--target-gas-limit=30000000` and `--bonsai-parallel-tx-processing-enabled=false`. The parallel TX processing bug can cause world state root mismatches on competing blocks (issue [#7844](https://github.com/hyperledger/besu/issues/7844)).
+
+- **Reth swap (Geth -> Reth):** The `mergeNetsplitBlock` field must only be present during chain data import, not when running Reth normally. If left in the chain spec during normal operation, Reth computes a different fork ID and fails to peer with other EL nodes.
 
 - **Lighthouse v5.3.0 -> latest requires 2-step upgrade**: v5.3.0 uses DB schema v21 which cannot be read by v8.x directly (`InvalidVersionByte` error). v6.0.0 bridges the migration (schema v21->v22). The swap daemon handles this automatically via the `node1-cl-mid` step.
+
 - **Lighthouse latest** has a pre-Electra attestation format bug (gossipsub). It cannot operate correctly before the Electra fork, which is why node1 CL must swap from v6.0.0 to latest precisely at the Electra boundary.
+
 - **Lodestar latest** dropped pre-Electra block production. It cannot produce blocks before the Electra fork, constraining the node2 CL swap to happen at the Electra boundary.
-- **Besu 24.10.0** has a BONSAI parallel transaction processing bug that can cause world state root mismatches on competing blocks (issue [#7844](https://github.com/hyperledger/besu/issues/7844)). This is mitigated by passing `--Xbonsai-parallel-tx-processing-enabled=false`.
-- **Nethermind** has a hardcoded mainnet `FinalTotalDifficulty` that prevents private chain PoW sync after the merge. This is why node2 uses Geth instead of Nethermind.
-- **Teku latest** dropped TTD-based merge transition support entirely. Older versions have engine API compatibility issues. This is why node2 uses Lodestar instead of Teku.
+
+- **Nethermind** has a hardcoded mainnet `FinalTotalDifficulty` that prevents private chain PoW sync after the merge. Node 5 (Nethermind + Grandine) is planned but not yet added.
+
+- **Teku latest** dropped TTD-based merge transition support entirely. Older versions have engine API compatibility issues.
+
 - **Extra miners** are recommended to speed up the PoW phase. The quickstart script automatically manages miner lifecycle around the merge.
