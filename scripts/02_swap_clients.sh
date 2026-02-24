@@ -392,14 +392,16 @@ swap_node1_el() {
     sleep 1
 
     # Re-init with full genesis to update chain config (blobSchedule etc.)
-    log "  Re-initializing datadir with new genesis (chain config update)..."
+    # IMPORTANT: Use --state.scheme=hash to preserve the v1.11.6 chain data.
+    # New geth defaults to path-based state scheme which would destroy the old DB.
+    log "  Re-initializing datadir with new genesis (chain config update, hash scheme)..."
     docker run --rm \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
         -v "$DATA_DIR/node1/el:/data" \
         "$EL_IMAGE_NEW_GETH" \
-        --datadir /data init /genesis.json 2>&1 | tail -3
+        --datadir /data --state.scheme=hash init /genesis.json 2>&1 | tail -3
 
     # Build bootnode list from running peers
     local node3_enode node4_enode bootnode_list=""
@@ -412,6 +414,7 @@ swap_node1_el() {
     done
 
     # Start new geth (same datadir, no mining flags)
+    # --state.scheme=hash preserves compatibility with v1.11.6 chain data
     log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node1-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE1_EL_IP" \
@@ -423,6 +426,7 @@ swap_node1_el() {
         "$EL_IMAGE_NEW_GETH" \
         --datadir /data \
         --networkid "$CHAIN_ID" \
+        --state.scheme=hash \
         --miner.gasprice=1 \
         --http --http.addr=0.0.0.0 --http.port=8545 \
         --http.api=eth,net,web3,debug,trace,admin,txpool \
@@ -460,14 +464,15 @@ swap_node2_el() {
     sleep 1
 
     # Re-init with full genesis to update chain config (blobSchedule etc.)
-    log "  Re-initializing datadir with new genesis (chain config update)..."
+    # IMPORTANT: Use --state.scheme=hash to preserve the v1.11.6 chain data.
+    log "  Re-initializing datadir with new genesis (chain config update, hash scheme)..."
     docker run --rm \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
         -v "$DATA_DIR/node2/el:/data" \
         "$EL_IMAGE_NEW_GETH" \
-        --datadir /data init /genesis.json 2>&1 | tail -3
+        --datadir /data --state.scheme=hash init /genesis.json 2>&1 | tail -3
 
     # Build bootnode list from running peers
     local node1_enode node3_enode node4_enode bootnode_list=""
@@ -485,6 +490,7 @@ swap_node2_el() {
     fi
 
     # Start new geth (same datadir, no mining)
+    # --state.scheme=hash preserves compatibility with v1.11.6 chain data
     log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node2-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE2_EL_IP" \
@@ -496,6 +502,7 @@ swap_node2_el() {
         "$EL_IMAGE_NEW_GETH" \
         --datadir /data \
         --networkid "$CHAIN_ID" \
+        --state.scheme=hash \
         --miner.gasprice=1 \
         --http --http.addr=0.0.0.0 --http.port=8545 \
         --http.api=eth,net,web3,debug,trace,admin,txpool \
@@ -845,8 +852,9 @@ swap_node3_el() {
         --engine-jwt-secret=/jwt \
         --p2p-port=30303 \
         --sync-mode=FULL \
-        --sync-min-peers=1 \
         --min-gas-price=0 \
+        --target-gas-limit=30000000 \
+        --bonsai-parallel-tx-processing-enabled=false \
         $besu_bootnodes
 
     wait_for_el "$NODE3_EL_IP" "node3"
@@ -875,14 +883,15 @@ swap_node4_el_mid() {
     sleep 1
 
     # Re-init with full genesis to update chain config (blobSchedule etc.)
-    log "  Re-initializing datadir with new genesis (chain config update)..."
+    # IMPORTANT: Use --state.scheme=hash to preserve the v1.11.6 chain data.
+    log "  Re-initializing datadir with new genesis (chain config update, hash scheme)..."
     docker run --rm \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
         -v "$DATA_DIR/node4/el:/data" \
         "$EL_IMAGE_NEW_GETH" \
-        --datadir /data init /genesis.json 2>&1 | tail -3
+        --datadir /data --state.scheme=hash init /genesis.json 2>&1 | tail -3
 
     # Build bootnode list from running peers
     local node1_enode node3_enode bootnode_list=""
@@ -895,6 +904,7 @@ swap_node4_el_mid() {
     done
 
     # Start new geth (same datadir, no mining)
+    # --state.scheme=hash preserves compatibility with v1.11.6 chain data
     log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node4-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE4_EL_IP" \
@@ -906,6 +916,7 @@ swap_node4_el_mid() {
         "$EL_IMAGE_NEW_GETH" \
         --datadir /data \
         --networkid "$CHAIN_ID" \
+        --state.scheme=hash \
         --miner.gasprice=1 \
         --http --http.addr=0.0.0.0 --http.port=8545 \
         --http.api=eth,net,web3,debug,trace,admin,txpool \
@@ -1002,17 +1013,20 @@ print(lo)
 ")
     log "  Merge block: $merge_block (first PoS block with difficulty=0)"
 
-    # ── Step 3: Generate reth genesis with mergeNetsplitBlock ─────────
-    log "  Generating genesis_reth.json with mergeNetsplitBlock=$merge_block..."
+    # ── Step 3: Generate reth genesis with mergeNetsplitBlock (for import) ──
+    # mergeNetsplitBlock is needed during chain import so reth knows the
+    # PoW/PoS boundary. It will be removed before running to fix fork ID.
+    log "  Generating import genesis with mergeNetsplitBlock=$merge_block..."
     local reth_genesis="$GENERATED_DIR/el/genesis_reth.json"
+    local reth_import_genesis="$GENERATED_DIR/el/genesis_reth_import.json"
     python3 -c "
 import json
 with open('$GENERATED_DIR/el/genesis.json') as f:
     genesis = json.load(f)
 genesis['config']['mergeNetsplitBlock'] = $merge_block
-with open('$reth_genesis', 'w') as f:
+with open('$reth_import_genesis', 'w') as f:
     json.dump(genesis, f, indent=2)
-print('  Written genesis_reth.json')
+print('  Written genesis_reth_import.json')
 "
 
     # ── Step 4: Stop geth ─────────────────────────────────────────────
@@ -1030,12 +1044,18 @@ print('  Written genesis_reth.json')
     log "  Importing $latest_dec blocks into reth..."
     docker run --rm \
         -v "$DATA_DIR/node4/el:/data" \
-        -v "$reth_genesis:/genesis.json" \
+        -v "$reth_import_genesis:/genesis.json" \
         -v "$export_rlp:/chain_export.rlp" \
         "$EL_IMAGE_RETH" \
         import --chain=/genesis.json --datadir=/data /chain_export.rlp 2>&1 \
         | tail -5
     log "  Chain import complete."
+
+    # ── Step 6b: Create clean run genesis (no mergeNetsplitBlock) ─────
+    # mergeNetsplitBlock adds an extra fork to the fork ID computation,
+    # causing reth's fork ID to differ from geth's, preventing EL peering.
+    cp "$GENERATED_DIR/el/genesis.json" "$reth_genesis"
+    log "  Created clean run genesis (no mergeNetsplitBlock for correct fork ID)"
 
     # ── Step 7: Collect bootnodes ─────────────────────────────────────
     local node1_enode node2_enode node3_enode bootnode_list=""
