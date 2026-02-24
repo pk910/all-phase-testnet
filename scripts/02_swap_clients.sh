@@ -190,7 +190,7 @@ load_config() {
 # node1-cl-mid (intermediate lighthouse DB migration) happens early alongside EL swaps.
 # Final CL swaps are LAST because they must happen at the Electra boundary.
 # node2-cl swaps first (lodestar is fast), then node1-cl (lighthouse).
-ALL_SWAP_TARGETS="node1-el node2-el node4-el-mid node1-cl-mid node4-el node3-el node2-cl node4-cl node1-cl"
+ALL_SWAP_TARGETS="node1-el node2-el node4-el-mid node1-cl-mid node4-el node3-el node2-cl node4-cl node1-cl node3-cl-refresh"
 
 #############################################################################
 # Swap state tracking (marker files)
@@ -1187,6 +1187,77 @@ swap_node4_cl() {
     log "  Node 4 CL swap complete."
 }
 
+# Node3 CL: Restart Prysm with fresh bootnodes after all CL swaps
+# Prysm is never version-swapped, but after the other CL nodes swap their
+# identities change. Prysm's original bootstrap ENR becomes stale, leaving
+# it with 0-1 peers and causing it to fall off the canonical chain.
+swap_node3_cl_refresh() {
+    if is_swapped "node3-cl-refresh"; then
+        log "  node3-cl-refresh already done -- skipping."
+        return 0
+    fi
+
+    log ""
+    log "=== Refreshing Node 3 CL (Prysm) bootnodes ==="
+
+    # Collect ENRs from all other (already swapped) CL nodes
+    local node1_cl_enr node2_cl_enr node4_cl_enr boot_enrs=""
+    node1_cl_enr=$(curl -s "http://${NODE1_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    node2_cl_enr=$(curl -s "http://${NODE2_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    node4_cl_enr=$(curl -s "http://${NODE4_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    for enr in "$node1_cl_enr" "$node2_cl_enr" "$node4_cl_enr"; do
+        if [ -n "$enr" ] && [ "$enr" != "null" ]; then
+            boot_enrs="${boot_enrs:+$boot_enrs,}$enr"
+        fi
+    done
+
+    local prysm_bootnodes=""
+    if [ -n "$boot_enrs" ]; then
+        prysm_bootnodes="--bootstrap-node=$boot_enrs"
+        log "  Fresh bootnodes from ${boot_enrs:0:60}..."
+    else
+        log "  WARNING: No CL ENRs found!"
+    fi
+
+    # Stop and restart Prysm (same version, same data, new bootnodes)
+    log "  Restarting Prysm with fresh bootnodes..."
+    docker rm -f "${CONTAINER_PREFIX}-node3-cl" >/dev/null 2>&1 || true
+    sleep 2
+
+    docker run -d --name "${CONTAINER_PREFIX}-node3-cl" \
+        --network "$DOCKER_NETWORK" --ip "$NODE3_CL_IP" \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$DATA_DIR/node3/cl:/data" \
+        -v "$GENERATED_DIR/cl:/cl-config" \
+        -v "$JWT_SECRET:/jwt" \
+        -p 5054:3500 -p 9002:13000 -p 9002:12000/udp \
+        "$CL_IMAGE_PRYSM_BEACON" \
+        --accept-terms-of-use=true \
+        --chain-config-file=/cl-config/config.yaml \
+        --genesis-state=/cl-config/genesis.ssz \
+        --datadir=/data \
+        --execution-endpoint="http://${CONTAINER_PREFIX}-node3-el:8551" \
+        --jwt-secret=/jwt \
+        --contract-deployment-block=0 \
+        --rpc-host=0.0.0.0 --rpc-port=4000 \
+        --http-host=0.0.0.0 --http-port=3500 \
+        --http-cors-domain="*" \
+        --p2p-host-ip="$NODE3_CL_IP" \
+        --p2p-tcp-port=13000 --p2p-udp-port=12000 \
+        --p2p-static-id=true \
+        --min-sync-peers=0 \
+        --subscribe-all-subnets=true \
+        --suggested-fee-recipient="$ETHERBASE" \
+        $prysm_bootnodes
+
+    wait_for_cl "$NODE3_CL_IP" "3500" "node3"
+    wait_for_cl_peers "$NODE3_CL_IP" "3500" "node3" 2 60
+
+    mark_swapped "node3-cl-refresh"
+    log "  Node 3 CL (Prysm) bootnode refresh complete."
+}
+
 #############################################################################
 # Status command
 #############################################################################
@@ -1253,6 +1324,10 @@ cmd_status() {
                 deadline_epoch=$ELECTRA_EPOCH
                 swap_desc="daemon target: ~${SWAP_NODE1_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE1_CL_LEAD_SLOTS)))"
                 ;;
+            node3-cl-refresh)
+                deadline_epoch=$((ELECTRA_EPOCH + 2))
+                swap_desc="after all CL swaps complete"
+                ;;
         esac
 
         if is_swapped "$target"; then
@@ -1275,6 +1350,7 @@ cmd_status() {
             node2-cl)     log "  node2-cl      lodestar v1.38.0 -> latest       $status_str" ;;
             node4-cl)     log "  node4-cl      teku 25.1.0 -> latest            $status_str" ;;
             node1-cl)     log "  node1-cl      lighthouse v6.0.0 -> latest      $status_str" ;;
+            node3-cl-refresh) log "  node3-cl-ref  prysm bootnode refresh           $status_str" ;;
         esac
     done
 }
@@ -1406,6 +1482,12 @@ cmd_daemon() {
                         should_swap=true
                     fi
                     ;;
+                node3-cl-refresh)
+                    # Restart Prysm with fresh bootnodes after all CL swaps
+                    if is_swapped "node1-cl"; then
+                        should_swap=true
+                    fi
+                    ;;
             esac
 
             if [ "$should_swap" = true ]; then
@@ -1413,7 +1495,7 @@ cmd_daemon() {
 
                 # Verify chain is finalizing before swapping (skip for CL swaps
                 # at fork boundary since chain health may be degrading anyway)
-                if [ "$target" != "node1-cl" ] && [ "$target" != "node2-cl" ] && [ "$target" != "node4-cl" ]; then
+                if [ "$target" != "node1-cl" ] && [ "$target" != "node2-cl" ] && [ "$target" != "node4-cl" ] && [ "$target" != "node3-cl-refresh" ]; then
                     local fin_epoch
                     if fin_epoch=$(get_finalized_epoch); then
                         if [ "$fin_epoch" -lt $((current_epoch - 5)) ]; then
