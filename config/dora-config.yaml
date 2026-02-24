@@ -24,6 +24,8 @@ beaconapi:
       name: "Lodestar"
     - url: "http://allphase-node3-cl:3500"
       name: "Prysm"
+    - url: "http://allphase-node4-cl:5052"
+      name: "Teku"
 
 executionapi:
   endpoints:
@@ -33,6 +35,8 @@ executionapi:
       name: "Geth (node2)"
     - url: "http://allphase-node3-el:8545"
       name: "Besu"
+    - url: "http://allphase-node4-el:8545"
+      name: "Reth"
   depositLogBatchSize: 1000
 
 indexer:
