@@ -143,9 +143,11 @@ load_config() {
     SWAP_NODE1_CL_EPOCH=$ELECTRA_EPOCH
     SWAP_NODE2_CL_EPOCH=$ELECTRA_EPOCH
     ELECTRA_FIRST_SLOT=$(( ELECTRA_EPOCH * SLOTS_PER_EPOCH ))
-    # Trigger CL swaps this many slots before Electra (gives startup time)
+    # Trigger CL swaps before Electra — staggered to allow peering between swaps.
+    # node2-cl (lodestar) swaps first with more lead time (20 slots = 4 min).
+    # node1-cl (lighthouse) swaps after lodestar is healthy (10 slots lead).
+    SWAP_NODE2_CL_LEAD_SLOTS=20
     SWAP_NODE1_CL_LEAD_SLOTS=10
-    SWAP_NODE2_CL_LEAD_SLOTS=10
 }
 
 # All swap target names in execution order
@@ -253,6 +255,22 @@ check_el_peers() {
         sleep 2
     done
     log "  Warning: $name EL has no peers after ${max_wait}s (may reconnect later)"
+}
+
+wait_for_cl_peers() {
+    local ip="$1" port="$2" name="$3" min_peers="${4:-2}" max_wait="${5:-60}"
+    log "  Waiting for $name CL to reach $min_peers peers (up to ${max_wait}s)..."
+    for i in $(seq 1 "$max_wait"); do
+        local peers
+        peers=$(curl -s --max-time 2 "http://${ip}:${port}/eth/v1/node/peer_count" 2>/dev/null \
+            | jq -r '.data.connected' 2>/dev/null || echo "0")
+        if [ -n "$peers" ] && [ "$peers" != "null" ] && [ "$peers" -ge "$min_peers" ] 2>/dev/null; then
+            log "  $name CL peers: $peers"
+            return 0
+        fi
+        sleep 2
+    done
+    log "  Warning: $name CL has fewer than $min_peers peers after ${max_wait}s"
 }
 
 #############################################################################
@@ -522,6 +540,7 @@ swap_node2_cl() {
         $bootnode_args
 
     wait_for_cl "$NODE2_CL_IP" "5051" "node2"
+    wait_for_cl_peers "$NODE2_CL_IP" "5051" "node2" 2 30
 
     # Start new lodestar validator
     log "  Starting new lodestar validator..."
@@ -646,6 +665,27 @@ swap_node1_cl() {
     docker stop -t 30 "${CONTAINER_PREFIX}-node1-cl" >/dev/null 2>&1 || true
     docker rm -f "${CONTAINER_PREFIX}-node1-cl" >/dev/null 2>&1 || true
 
+    # Get CL ENRs for bootnodes (from lodestar and prysm — both still running)
+    local node2_cl_enr node3_cl_enr boot_nodes=""
+    node2_cl_enr=$(curl -s "http://${NODE2_CL_IP}:5051/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    node3_cl_enr=$(curl -s "http://${NODE3_CL_IP}:3500/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    local boot_enrs=""
+    if [ -n "$node2_cl_enr" ] && [ "$node2_cl_enr" != "null" ]; then
+        boot_enrs="$node2_cl_enr"
+        log "  Lodestar ENR: ${node2_cl_enr:0:40}..."
+    fi
+    if [ -n "$node3_cl_enr" ] && [ "$node3_cl_enr" != "null" ]; then
+        if [ -n "$boot_enrs" ]; then
+            boot_enrs="$boot_enrs,$node3_cl_enr"
+        else
+            boot_enrs="$node3_cl_enr"
+        fi
+        log "  Prysm ENR: ${node3_cl_enr:0:40}..."
+    fi
+    if [ -n "$boot_enrs" ]; then
+        boot_nodes="--boot-nodes=$boot_enrs"
+    fi
+
     # Start new lighthouse beacon
     log "  Starting new lighthouse beacon (${CL_IMAGE_LIGHTHOUSE})..."
     docker run -d --name "${CONTAINER_PREFIX}-node1-cl" \
@@ -669,9 +709,11 @@ swap_node1_cl() {
         --enr-tcp-port=9000 \
         --port=9000 \
         --target-peers=2 \
-        --subscribe-all-subnets
+        --subscribe-all-subnets \
+        $boot_nodes
 
     wait_for_cl "$NODE1_CL_IP" "5052" "node1"
+    wait_for_cl_peers "$NODE1_CL_IP" "5052" "node1" 2 30
 
     # Start new lighthouse validator
     log "  Starting new lighthouse validator..."
@@ -944,9 +986,9 @@ cmd_daemon() {
             if [ "$should_swap" = true ]; then
                 log ">>> Slot $current_slot (epoch $current_epoch) -- triggering swap: $target"
 
-                # Verify chain is finalizing before swapping (skip for CL swap
+                # Verify chain is finalizing before swapping (skip for CL swaps
                 # at fork boundary since chain health may be degrading anyway)
-                if [ "$target" != "node1-cl" ]; then
+                if [ "$target" != "node1-cl" ] && [ "$target" != "node2-cl" ]; then
                     local fin_epoch
                     if fin_epoch=$(get_finalized_epoch); then
                         if [ "$fin_epoch" -lt $((current_epoch - 5)) ]; then

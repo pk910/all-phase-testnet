@@ -148,6 +148,9 @@ pull_images() {
 start_node1() {
     log "Starting Node 1: Geth (mining) + Lighthouse..."
 
+    # Clean swap state markers from any previous run
+    rm -f "$DATA_DIR"/.swap-* 2>/dev/null || true
+
     # Clean & prepare data dirs
     docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf /hostdata/node1 2>/dev/null || true
     mkdir -p "$DATA_DIR/node1/el" "$DATA_DIR/node1/cl" "$DATA_DIR/node1/vc"
