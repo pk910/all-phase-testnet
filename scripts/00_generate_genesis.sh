@@ -695,7 +695,7 @@ log "  -> $GENERATED_DIR/keys/prysm-password.txt"
 log "Generating validator names..."
 
 # Node-to-client mapping (must match 01_start_network.sh)
-NODE_CLIENTS=("geth/lighthouse" "geth/lodestar" "besu/prysm")
+NODE_CLIENTS=("geth/lighthouse" "geth/lodestar" "besu/prysm" "reth/teku" "nethermind/grandine")
 
 NAMES_FILE="$GENERATED_DIR/validator-names.yaml"
 > "$NAMES_FILE"

@@ -20,7 +20,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 # and chain sync before the merge window.
 #############################################################################
 
-MINER_IP="${MINER_IP_BASE:-172.30.0}.50"
+MINER_IP="${MINER_IP_BASE:-172.30.0}.70"
 MINER_NAME="${CONTAINER_PREFIX}-miner"
 
 #############################################################################

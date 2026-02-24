@@ -19,6 +19,7 @@ Components:
   node1       Geth v1.11.6 (mining) + Lighthouse v5.3.0 + Lighthouse VC
   node2       Geth v1.11.6 (sync) + Lodestar + Lodestar VC
   node3       Besu 24.10.0 (mining) + Prysm + Prysm VC
+  node4       Geth v1.11.6 (sync) + Teku 25.1.0 (combined beacon+validator)
   dora        Dora block explorer
   spamoor     Spamoor transaction spammer
   blockscout  Blockscout explorer (postgres + verifier + backend + frontend)
@@ -47,7 +48,7 @@ for arg in "$@"; do
     case "$arg" in
         start|stop) ACTION="$arg" ;;
         -h|--help) usage; exit 0 ;;
-        node1|node2|node3|dora|spamoor|blockscout) COMPONENTS+=("$arg") ;;
+        node1|node2|node3|node4|dora|spamoor|blockscout) COMPONENTS+=("$arg") ;;
         *) log_error "Unknown argument: $arg"; usage; exit 1 ;;
     esac
 done
@@ -61,7 +62,7 @@ fi
 # Ordered component list (respect start dependencies)
 #############################################################################
 # When starting, we need node1 before node3, and both before node2
-ORDER="node1 node3 node2 dora spamoor blockscout"
+ORDER="node1 node3 node4 node2 dora spamoor blockscout"
 
 ordered_components() {
     local result=()
@@ -90,12 +91,15 @@ load_config() {
     log "  Etherbase (mining + fee recipient): $ETHERBASE"
 
     EL_IMAGE_GETH=$(read_config "el_image_old_geth")
+    EL_IMAGE_NEW_GETH=$(read_config "el_image_new_geth")
     EL_IMAGE_BESU=$(read_config "el_image_old_besu")
     CL_IMAGE_OLD_LIGHTHOUSE=$(read_config "cl_image_old_lighthouse")
     CL_IMAGE_LIGHTHOUSE=$(read_config "cl_image_lighthouse")
     CL_IMAGE_LODESTAR=$(read_config "cl_image_old_lodestar")
     CL_IMAGE_PRYSM_BEACON=$(read_config "cl_image_prysm_beacon")
     CL_IMAGE_PRYSM_VALIDATOR=$(read_config "cl_image_prysm_validator")
+    CL_IMAGE_OLD_TEKU=$(read_config "cl_image_old_teku")
+    CL_IMAGE_TEKU=$(read_config "cl_image_teku")
     DORA_IMAGE=$(read_config "dora_image")
     SPAMOOR_IMAGE=$(read_config "spamoor_image")
     BLOCKSCOUT_IMAGE=$(read_config "blockscout_image")
@@ -120,6 +124,7 @@ pull_images() {
             node1) images+=("$EL_IMAGE_GETH" "$CL_IMAGE_OLD_LIGHTHOUSE") ;;
             node2) images+=("$EL_IMAGE_GETH" "$CL_IMAGE_LODESTAR") ;;
             node3) images+=("$EL_IMAGE_BESU" "$CL_IMAGE_PRYSM_BEACON" "$CL_IMAGE_PRYSM_VALIDATOR") ;;
+            node4) images+=("$EL_IMAGE_GETH" "$CL_IMAGE_OLD_TEKU") ;;
             dora) images+=("$DORA_IMAGE") ;;
             spamoor) images+=("$SPAMOOR_IMAGE") ;;
             blockscout) images+=("$BLOCKSCOUT_IMAGE" "$BLOCKSCOUT_FRONTEND_IMAGE" "$BLOCKSCOUT_VERIF_IMAGE" "postgres:17-alpine") ;;
@@ -147,6 +152,9 @@ pull_images() {
 
 start_node1() {
     log "Starting Node 1: Geth (mining) + Lighthouse..."
+
+    # Clean swap state markers from any previous run
+    rm -f "$DATA_DIR"/.swap-* 2>/dev/null || true
 
     # Clean & prepare data dirs
     docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf /hostdata/node1 2>/dev/null || true
@@ -352,6 +360,141 @@ start_node3() {
         --suggested-fee-recipient="$ETHERBASE"
 
     log "  Prysm VC container: ${CONTAINER_PREFIX}-node3-vc"
+}
+
+start_node4() {
+    log "Starting Node 4: Geth (sync) + Teku 25.1.0..."
+
+    # Create Teku-compatible CL config (strip BLOB_SCHEDULE which 25.1.0 doesn't understand)
+    if [ ! -f "$GENERATED_DIR/cl/config-teku-old.yaml" ]; then
+        sed '/^BLOB_SCHEDULE:/,/^[^ ]/{ /^BLOB_SCHEDULE:/d; /^  /d; }' \
+            "$GENERATED_DIR/cl/config.yaml" > "$GENERATED_DIR/cl/config-teku-old.yaml"
+        log "  Created Teku 25.1.0 compatible config (stripped BLOB_SCHEDULE)"
+    fi
+
+    # Clean & prepare data dirs
+    docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf /hostdata/node4 2>/dev/null || true
+    mkdir -p "$DATA_DIR/node4/el" "$DATA_DIR/node4/cl"
+
+    # Stop any existing containers
+    stop_component node4
+
+    # Build EL bootnode list from running nodes
+    local node1_enode node3_enode geth_bootnodes=""
+    node1_enode=$(get_node1_enode)
+    node3_enode=$(get_node3_enode)
+
+    local bootnode_list=""
+    if [ -n "$node1_enode" ]; then
+        bootnode_list="$node1_enode"
+        log "  Node1 enode: $node1_enode"
+    fi
+    if [ -n "$node3_enode" ]; then
+        if [ -n "$bootnode_list" ]; then
+            bootnode_list="$bootnode_list,$node3_enode"
+        else
+            bootnode_list="$node3_enode"
+        fi
+        log "  Node3 enode: $node3_enode"
+    fi
+
+    if [ -n "$bootnode_list" ]; then
+        geth_bootnodes="--bootnodes=$bootnode_list"
+    fi
+
+    # Geth init (using old geth for PoW chain sync; swapped to geth latest then reth later)
+    log "  Initializing geth datadir..."
+    docker run --rm \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
+        -v "$DATA_DIR/node4/el:/data" \
+        "$EL_IMAGE_GETH" \
+        --datadir /data init /genesis.json 2>&1 | tail -5
+
+    # Geth run (sync only, no mining)
+    log "  Starting geth old (sync)..."
+    docker run -d --name "${CONTAINER_PREFIX}-node4-el" \
+        --network "$DOCKER_NETWORK" --ip "$NODE4_EL_IP" \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$DATA_DIR/node4/el:/data" \
+        -v "$JWT_SECRET:/jwt" \
+        -p 8548:8545 -p 8554:8551 -p 30306:30303 -p 30306:30303/udp \
+        "$EL_IMAGE_GETH" \
+        --datadir /data \
+        --networkid "$CHAIN_ID" \
+        --miner.gasprice=1 \
+        --http --http.addr=0.0.0.0 --http.port=8545 \
+        --http.api=eth,net,web3,debug,trace,admin,txpool \
+        --http.corsdomain="*" --http.vhosts="*" \
+        --authrpc.addr=0.0.0.0 --authrpc.port=8551 \
+        --authrpc.jwtsecret=/jwt \
+        --authrpc.vhosts="*" \
+        --port=30303 \
+        --verbosity=3 \
+        --syncmode=full \
+        $geth_bootnodes
+
+    log "  Geth container: ${CONTAINER_PREFIX}-node4-el"
+    sleep 3
+
+    # Get CL ENRs for Teku bootnodes
+    local node1_cl_enr node3_cl_enr teku_bootnodes=""
+    node1_cl_enr=$(curl -s "http://${NODE1_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    node3_cl_enr=$(curl -s "http://${NODE3_CL_IP}:3500/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+
+    local bootnode_enrs=""
+    if [ -n "$node1_cl_enr" ] && [ "$node1_cl_enr" != "null" ]; then
+        bootnode_enrs="$node1_cl_enr"
+        log "  Lighthouse ENR: ${node1_cl_enr:0:40}..."
+    fi
+    if [ -n "$node3_cl_enr" ] && [ "$node3_cl_enr" != "null" ]; then
+        if [ -n "$bootnode_enrs" ]; then
+            bootnode_enrs="$bootnode_enrs,$node3_cl_enr"
+        else
+            bootnode_enrs="$node3_cl_enr"
+        fi
+        log "  Prysm ENR: ${node3_cl_enr:0:40}..."
+    fi
+
+    if [ -n "$bootnode_enrs" ]; then
+        teku_bootnodes="--p2p-discovery-bootnodes=$bootnode_enrs"
+    fi
+
+    # Teku 25.1.0 (combined beacon + validator from genesis)
+    # 25.1.0 is the last version with TTD-based merge support (removed in 25.2.0).
+    # Supports Phase0 through Deneb; swapped to Teku latest at Electra.
+    log "  Starting teku 25.1.0 (beacon + validator)..."
+    docker run -d --name "${CONTAINER_PREFIX}-node4-cl" \
+        --network "$DOCKER_NETWORK" --ip "$NODE4_CL_IP" \
+        -v "$DATA_DIR/node4/cl:/data" \
+        -v "$GENERATED_DIR/cl:/cl-config" \
+        -v "$JWT_SECRET:/jwt" \
+        -v "$GENERATED_DIR/keys/node4:/keys" \
+        -p 5055:5052 -p 9003:9000 -p 9003:9000/udp \
+        "$CL_IMAGE_OLD_TEKU" \
+        --network=/cl-config/config-teku-old.yaml \
+        --initial-state=/cl-config/genesis.ssz \
+        --data-path=/data \
+        --ee-endpoint="http://${CONTAINER_PREFIX}-node4-el:8551" \
+        --ee-jwt-secret-file=/jwt \
+        --rest-api-enabled=true \
+        --rest-api-interface=0.0.0.0 \
+        --rest-api-port=5052 \
+        --rest-api-host-allowlist="*" \
+        --rest-api-cors-origins="*" \
+        --p2p-enabled=true \
+        --p2p-port=9000 \
+        --p2p-advertised-ip="$NODE4_CL_IP" \
+        --p2p-discovery-site-local-addresses-enabled=true \
+        --p2p-peer-lower-bound=1 \
+        --p2p-subscribe-all-subnets-enabled=true \
+        --validator-keys=/keys/teku-keys:/keys/teku-secrets \
+        --validators-proposer-default-fee-recipient="$ETHERBASE" \
+        $teku_bootnodes
+
+    log "  Teku container: ${CONTAINER_PREFIX}-node4-cl (beacon + validator)"
 }
 
 start_node2() {
@@ -564,6 +707,7 @@ else:
         --rpchost="http://${CONTAINER_PREFIX}-node1-el:8545" \
         --rpchost="http://${CONTAINER_PREFIX}-node2-el:8545" \
         --rpchost="http://${CONTAINER_PREFIX}-node3-el:8545" \
+        --rpchost="http://${CONTAINER_PREFIX}-node4-el:8545" \
         --port=8080 \
         --db=/data/spamoor.db \
         --without-batcher \
@@ -713,6 +857,7 @@ for component in "${ORDERED[@]}"; do
         node1) log "  Node 1: Geth v1.11.6 (mining) + Lighthouse v5.3.0  [EL:8545 CL:5052]" ;;
         node2) log "  Node 2: Geth v1.11.6 (sync)   + Lodestar           [EL:8546 CL:5053]" ;;
         node3) log "  Node 3: Besu 24.10.0 (mining) + Prysm             [EL:8547 CL:5054]" ;;
+        node4) log "  Node 4: Geth v1.11.6 (sync)   + Teku 25.1.0        [EL:8548 CL:5055]" ;;
         dora) log "  Dora explorer:                          [http://localhost:8090]" ;;
         spamoor) log "  Spamoor:                                [http://localhost:8091]" ;;
         blockscout) log "  Blockscout:                             [http://localhost:3000] (API: http://localhost:4000)" ;;
