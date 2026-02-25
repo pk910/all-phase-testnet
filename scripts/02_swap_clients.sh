@@ -1334,11 +1334,59 @@ swap_node3_cl_refresh() {
         log "  WARNING: No CL ENRs found!"
     fi
 
-    # Stop and restart Prysm (same version, same data, new bootnodes)
-    log "  Restarting Prysm with fresh bootnodes..."
+    # Stop Prysm beacon, validator, AND Besu.
+    # IMPORTANT: Besu must also restart so its forkchoice state is fresh.
+    # If only Prysm restarts, it sends its old head to Besu via FCU. Besu
+    # may have already finalized past that point and returns INVALID, putting
+    # Prysm in unrecoverable optimistic mode with no peers.
+    log "  Stopping Prysm + Besu for coordinated restart..."
+    docker rm -f "${CONTAINER_PREFIX}-node3-vc" >/dev/null 2>&1 || true
     docker rm -f "${CONTAINER_PREFIX}-node3-cl" >/dev/null 2>&1 || true
+    docker rm -f "${CONTAINER_PREFIX}-node3-el" >/dev/null 2>&1 || true
     sleep 2
 
+    # Restart Besu first (same data, same config -- just resets forkchoice)
+    log "  Restarting Besu (forkchoice reset)..."
+    local node1_enode node2_enode besu_bootnodes=""
+    node1_enode=$(get_node1_enode)
+    node2_enode=$(get_node2_enode)
+    for enode in "$node1_enode" "$node2_enode"; do
+        if [ -n "$enode" ]; then
+            besu_bootnodes="${besu_bootnodes:+$besu_bootnodes,}$enode"
+        fi
+    done
+
+    docker run -d --name "${CONTAINER_PREFIX}-node3-el" \
+        --network "$DOCKER_NETWORK" --ip "$NODE3_EL_IP" \
+        -v "$DATA_DIR/node3/el:/data" \
+        -v "$GENERATED_DIR/el/besu-genesis.json:/genesis.json" \
+        -v "$JWT_SECRET:/jwt" \
+        -p 8547:8545 -p 8553:8551 -p 30305:30303 -p 30305:30303/udp \
+        "$EL_IMAGE_NEW_BESU" \
+        --genesis-file=/genesis.json \
+        --data-path=/data \
+        --network-id="$CHAIN_ID" \
+        --rpc-http-enabled \
+        --rpc-http-host=0.0.0.0 --rpc-http-port=8545 \
+        --rpc-http-api=ETH,NET,WEB3,DEBUG,TRACE,ADMIN,TXPOOL \
+        --rpc-http-cors-origins="*" \
+        --host-allowlist="*" \
+        --engine-rpc-port=8551 \
+        --engine-host-allowlist="*" \
+        --engine-jwt-secret=/jwt \
+        --p2p-host="$NODE3_EL_IP" \
+        --p2p-port=30303 \
+        --nat-method=NONE \
+        --sync-mode=FULL \
+        --data-storage-format=BONSAI \
+        --target-gas-limit=30000000 \
+        --bonsai-parallel-tx-processing-enabled=false \
+        ${besu_bootnodes:+--bootnodes="$besu_bootnodes"}
+
+    wait_for_el "$NODE3_EL_IP" "node3"
+
+    # Restart Prysm beacon (same data, new bootnodes)
+    log "  Restarting Prysm with fresh bootnodes..."
     docker run -d --name "${CONTAINER_PREFIX}-node3-cl" \
         --network "$DOCKER_NETWORK" --ip "$NODE3_CL_IP" \
         -u "$DOCKER_UID" \
@@ -1367,6 +1415,26 @@ swap_node3_cl_refresh() {
         $prysm_bootnodes
 
     wait_for_cl "$NODE3_CL_IP" "3500" "node3"
+
+    # Restart Prysm validator
+    log "  Restarting Prysm validator..."
+    docker rm -f "${CONTAINER_PREFIX}-node3-vc" >/dev/null 2>&1 || true
+    docker run -d --name "${CONTAINER_PREFIX}-node3-vc" \
+        --network "$DOCKER_NETWORK" \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$DATA_DIR/node3/vc:/data" \
+        -v "$GENERATED_DIR/cl:/cl-config" \
+        -v "$GENERATED_DIR/keys/node3:/keys" \
+        -v "$GENERATED_DIR/keys/prysm-password.txt:/prysm-password.txt" \
+        "$CL_IMAGE_PRYSM_VALIDATOR" \
+        --accept-terms-of-use=true \
+        --chain-config-file=/cl-config/config.yaml \
+        --wallet-dir=/keys/prysm \
+        --wallet-password-file=/prysm-password.txt \
+        --beacon-rpc-provider="${CONTAINER_PREFIX}-node3-cl:4000" \
+        --suggested-fee-recipient="$ETHERBASE"
+
     wait_for_cl_peers "$NODE3_CL_IP" "3500" "node3" 2 60
 
     mark_swapped "node3-cl-refresh"
