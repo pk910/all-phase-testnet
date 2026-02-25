@@ -1032,20 +1032,23 @@ print(lo)
 ")
     log "  Merge block: $merge_block (first PoS block with difficulty=0)"
 
-    # ── Step 3: Generate reth genesis with mergeNetsplitBlock (for import) ──
-    # mergeNetsplitBlock is needed during chain import so reth knows the
-    # PoW/PoS boundary. It will be removed before running to fix fork ID.
-    log "  Generating import genesis with mergeNetsplitBlock=$merge_block..."
+    # ── Step 3: Generate unified reth genesis with mergeNetsplitBlock ─────
+    # mergeNetsplitBlock is needed so reth knows the PoW/PoS boundary.
+    # IMPORTANT: The SAME genesis must be used for both import and run.
+    # Using different genesis configs causes reth to wipe the imported data.
+    # Trade-off: mergeNetsplitBlock adds an extra fork to EIP-2124 fork ID,
+    # so reth can't peer with geth/besu via devp2p. This is acceptable
+    # because reth receives all chain data via Engine API from the CL.
+    log "  Generating unified genesis with mergeNetsplitBlock=$merge_block..."
     local reth_genesis="$GENERATED_DIR/el/genesis_reth.json"
-    local reth_import_genesis="$GENERATED_DIR/el/genesis_reth_import.json"
     python3 -c "
 import json
 with open('$GENERATED_DIR/el/genesis.json') as f:
     genesis = json.load(f)
 genesis['config']['mergeNetsplitBlock'] = $merge_block
-with open('$reth_import_genesis', 'w') as f:
+with open('$reth_genesis', 'w') as f:
     json.dump(genesis, f, indent=2)
-print('  Written genesis_reth_import.json')
+print('  Written genesis_reth.json (unified, with mergeNetsplitBlock)')
 "
 
     # ── Step 4: Stop geth ─────────────────────────────────────────────
@@ -1063,35 +1066,16 @@ print('  Written genesis_reth_import.json')
     log "  Importing $latest_dec blocks into reth..."
     docker run --rm \
         -v "$DATA_DIR/node4/el:/data" \
-        -v "$reth_import_genesis:/genesis.json" \
+        -v "$reth_genesis:/genesis.json" \
         -v "$export_rlp:/chain_export.rlp" \
         "$EL_IMAGE_RETH" \
         import --chain=/genesis.json --datadir=/data /chain_export.rlp 2>&1 \
         | tail -5
     log "  Chain import complete."
 
-    # ── Step 6b: Create clean run genesis (no mergeNetsplitBlock) ─────
-    # mergeNetsplitBlock adds an extra fork to the fork ID computation,
-    # causing reth's fork ID to differ from geth's, preventing EL peering.
-    cp "$GENERATED_DIR/el/genesis.json" "$reth_genesis"
-    log "  Created clean run genesis (no mergeNetsplitBlock for correct fork ID)"
-
-    # ── Step 7: Collect bootnodes ─────────────────────────────────────
-    local node1_enode node2_enode node3_enode bootnode_list=""
-    node1_enode=$(get_node1_enode)
-    node2_enode=$(get_node2_enode)
-    node3_enode=$(get_node3_enode)
-    for enode in "$node1_enode" "$node2_enode" "$node3_enode"; do
-        if [ -n "$enode" ]; then
-            bootnode_list="${bootnode_list:+$bootnode_list,}$enode"
-        fi
-    done
-    local reth_bootnodes=""
-    if [ -n "$bootnode_list" ]; then
-        reth_bootnodes="--bootnodes=$bootnode_list"
-    fi
-
-    # ── Step 8: Start reth with imported chain ────────────────────────
+    # ── Step 7: Start reth with imported chain ────────────────────────
+    # No bootnodes needed: reth can't peer due to fork ID mismatch from
+    # mergeNetsplitBlock, but receives all data via Engine API from Teku CL.
     log "  Starting reth (${EL_IMAGE_RETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node4-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE4_EL_IP" \
@@ -1115,8 +1099,7 @@ print('  Written genesis_reth_import.json')
         --port=30303 \
         --discovery.port=30303 \
         --full \
-        -vvv \
-        $reth_bootnodes
+        -vvv
 
     wait_for_el "$NODE4_EL_IP" "node4"
     check_el_peers "$NODE4_EL_IP" "node4"
@@ -1277,8 +1260,15 @@ swap_node5_el_mid() {
 }
 
 # Node5 EL step 2: geth latest -> nethermind (at Deneb)
-# Nethermind uses chainspec genesis format and a completely different DB.
-# Clean the geth datadir and start Nethermind fresh; it syncs from EL peers.
+# NOTE: Nethermind EL peering is broken in this testnet setup.
+# Nethermind starts fresh from chainspec genesis and cannot peer with
+# geth/besu nodes (likely EIP-2124 fork ID mismatch from Parity chainspec
+# format). Without EL peers, Nethermind returns SYNCING for engine_newPayload,
+# taking the node offline. With 2/5 validators down (Nethermind + Reth both
+# failing), the chain drops below 2/3 finalization threshold.
+#
+# WORKAROUND: Keep geth latest from the mid swap. Node 5 stays as geth/Grandine.
+# This still provides 3 EL clients (geth, besu, reth) and 5 CL clients.
 swap_node5_el() {
     if is_swapped "node5-el"; then
         log "  node5-el already swapped -- skipping."
@@ -1286,68 +1276,25 @@ swap_node5_el() {
     fi
 
     log ""
-    log "=== Swapping Node 5 EL (step 2): geth latest -> nethermind ==="
-    log "  Grandine CL stays running -- only EL swap."
+    log "=== Node 5 EL (step 2): Keeping geth latest (Nethermind peering broken) ==="
+    log "  Nethermind cannot peer with geth/besu in this testnet setup."
+    log "  Keeping geth latest from mid swap. Node 5 stays as geth/Grandine."
 
-    # Stop geth latest
-    log "  Stopping geth latest..."
-    docker rm -f "${CONTAINER_PREFIX}-node5-el" >/dev/null 2>&1 || true
-    sleep 1
+    # Verify geth is still running and responding
+    local block
+    block=$(curl -s --max-time 5 -X POST "http://${NODE5_EL_IP}:8545" \
+        -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+        | jq -r '.result' 2>/dev/null || echo "")
 
-    # Clean geth datadir (nethermind uses different DB format)
-    log "  Cleaning geth datadir for nethermind..."
-    docker run --rm \
-        -v "$DATA_DIR/node5/el:/data" \
-        alpine sh -c "rm -rf /data/*"
-
-    # Collect bootnodes from running EL peers
-    local node1_enode node2_enode node3_enode node4_enode bootnode_list=""
-    node1_enode=$(get_node1_enode)
-    node2_enode=$(get_node2_enode)
-    node3_enode=$(get_node3_enode)
-    node4_enode=$(get_node4_enode)
-    for enode in "$node1_enode" "$node2_enode" "$node3_enode" "$node4_enode"; do
-        if [ -n "$enode" ]; then
-            bootnode_list="${bootnode_list:+$bootnode_list,}$enode"
-        fi
-    done
-    local nethermind_bootnodes=""
-    if [ -n "$bootnode_list" ]; then
-        nethermind_bootnodes="--Network.Bootnodes=$bootnode_list"
-        log "  Bootnodes: $(echo "$bootnode_list" | tr ',' '\n' | wc -l) peers"
+    if [ -n "$block" ] && [ "$block" != "null" ]; then
+        log "  Geth latest responding at block $block -- keeping as-is."
+    else
+        log "  WARNING: Geth not responding. Node 5 EL may need manual intervention."
     fi
 
-    # Start nethermind (fresh from chainspec genesis, syncs from peers)
-    log "  Starting nethermind (${EL_IMAGE_NETHERMIND})..."
-    docker run -d --name "${CONTAINER_PREFIX}-node5-el" \
-        --network "$DOCKER_NETWORK" --ip "$NODE5_EL_IP" \
-        -v "$DATA_DIR/node5/el:/data/nethermind" \
-        -v "$GENERATED_DIR/el/nethermind-genesis.json:/genesis.json" \
-        -v "$JWT_SECRET:/jwt" \
-        -p 8549:8545 -p 8555:8551 -p 30307:30303 -p 30307:30303/udp \
-        "$EL_IMAGE_NETHERMIND" \
-        --config none \
-        --Init.ChainSpecPath /genesis.json \
-        --data-dir /data/nethermind \
-        --JsonRpc.Enabled true \
-        --JsonRpc.Host 0.0.0.0 \
-        --JsonRpc.Port 8545 \
-        "--JsonRpc.EnabledModules=[Eth,Net,Web3,Admin,Subscribe,TxPool]" \
-        --JsonRpc.EngineHost 0.0.0.0 \
-        --JsonRpc.EnginePort 8551 \
-        "--JsonRpc.EngineEnabledModules=[Net,Eth,Subscribe,Web3]" \
-        --JsonRpc.JwtSecretFile /jwt \
-        --Network.P2PPort 30303 \
-        --Network.DiscoveryPort 30303 \
-        --Merge.Enabled true \
-        --log INFO \
-        $nethermind_bootnodes
-
-    wait_for_el "$NODE5_EL_IP" "node5" 180
-    check_el_peers "$NODE5_EL_IP" "node5"
-
     mark_swapped "node5-el"
-    log "  Node 5 EL swap complete."
+    log "  Node 5 EL swap complete (kept geth latest)."
 }
 
 # Node3 CL: Restart Prysm with fresh bootnodes after all CL swaps
@@ -1521,7 +1468,7 @@ cmd_status() {
             node4-el-mid) log "  node4-el-mid  geth v1.11.6 -> latest           $status_str" ;;
             node5-el-mid) log "  node5-el-mid  geth v1.11.6 -> latest           $status_str" ;;
             node4-el)     log "  node4-el      geth latest -> reth              $status_str" ;;
-            node5-el)     log "  node5-el      geth latest -> nethermind        $status_str" ;;
+            node5-el)     log "  node5-el      geth latest (keep, NM broken)   $status_str" ;;
             node1-cl-mid) log "  node1-cl-mid  lighthouse v5.3.0 -> v6.0.0      $status_str" ;;
             node2-el)     log "  node2-el      geth v1.11.6 -> latest           $status_str" ;;
             node3-el)     log "  node3-el      besu 24.10.0 -> latest           $status_str" ;;
@@ -1546,7 +1493,7 @@ cmd_daemon() {
     log "  node5-el-mid  geth old -> new             at epoch $SWAP_NODE5_EL_MID_EPOCH  (before Deneb @ $DENEB_EPOCH)"
     log "  node1-cl-mid  lighthouse v5.3.0 -> v6.0.0 at epoch $SWAP_NODE1_CL_MID_EPOCH  (DB migration, before Deneb)"
     log "  node4-el      geth latest -> reth         at epoch $SWAP_NODE4_EL_EPOCH  (at Deneb)"
-    log "  node5-el      geth latest -> nethermind   at epoch $SWAP_NODE5_EL_EPOCH  (at Deneb)"
+    log "  node5-el      geth latest (keep, NM broken) at epoch $SWAP_NODE5_EL_EPOCH  (at Deneb)"
     log "  node3-el      besu old -> new             at epoch $SWAP_NODE3_EL_EPOCH  (before Electra @ $ELECTRA_EPOCH)"
     log "  node2-cl      lodestar old -> new         ~${SWAP_NODE2_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE2_CL_LEAD_SLOTS)))"
     log "  node4-cl      teku 25.1.0 -> latest       ~${SWAP_NODE4_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE4_CL_LEAD_SLOTS)))"
