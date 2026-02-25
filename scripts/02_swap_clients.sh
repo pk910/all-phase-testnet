@@ -141,6 +141,7 @@ load_config() {
     CL_IMAGE_LODESTAR=$(read_config "cl_image_lodestar")
     CL_IMAGE_OLD_TEKU=$(read_config "cl_image_old_teku")
     CL_IMAGE_TEKU=$(read_config "cl_image_teku")
+    CL_IMAGE_PRYSM_BEACON=$(read_config "cl_image_prysm_beacon")
 
     BELLATRIX_EPOCH=$(read_config "bellatrix_fork_epoch")
     CAPELLA_EPOCH=$(read_config "capella_fork_epoch")
@@ -1203,7 +1204,7 @@ swap_node3_cl_refresh() {
     # Collect ENRs from all other (already swapped) CL nodes
     local node1_cl_enr node2_cl_enr node4_cl_enr boot_enrs=""
     node1_cl_enr=$(curl -s "http://${NODE1_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
-    node2_cl_enr=$(curl -s "http://${NODE2_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
+    node2_cl_enr=$(curl -s "http://${NODE2_CL_IP}:5051/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
     node4_cl_enr=$(curl -s "http://${NODE4_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
     for enr in "$node1_cl_enr" "$node2_cl_enr" "$node4_cl_enr"; do
         if [ -n "$enr" ] && [ "$enr" != "null" ]; then
@@ -1212,9 +1213,13 @@ swap_node3_cl_refresh() {
     done
 
     local prysm_bootnodes=""
-    if [ -n "$boot_enrs" ]; then
-        prysm_bootnodes="--bootstrap-node=$boot_enrs"
-        log "  Fresh bootnodes from ${boot_enrs:0:60}..."
+    for enr in "$node1_cl_enr" "$node2_cl_enr" "$node4_cl_enr"; do
+        if [ -n "$enr" ] && [ "$enr" != "null" ]; then
+            prysm_bootnodes="$prysm_bootnodes --bootstrap-node=$enr"
+        fi
+    done
+    if [ -n "$prysm_bootnodes" ]; then
+        log "  Fresh bootnodes: $(echo $prysm_bootnodes | wc -w) ENRs"
     else
         log "  WARNING: No CL ENRs found!"
     fi
