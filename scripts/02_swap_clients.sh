@@ -1346,13 +1346,15 @@ swap_node3_cl_refresh() {
     docker rm -f "${CONTAINER_PREFIX}-node3-el" >/dev/null 2>&1 || true
     sleep 2
 
-    # Wipe Prysm CL database so it syncs fresh from genesis.
+    # Wipe Prysm CL beacon database so it syncs fresh from genesis.
     # This avoids the stale-head issue where Prysm loads an old DB head,
     # sends it to Besu via FCU, and gets INVALID because Besu has finalized
-    # past that point. Using a docker container for cleanup because the
-    # files may be owned by a different UID.
-    log "  Wiping Prysm CL database for clean sync..."
-    docker run --rm -v "$DATA_DIR/node3/cl:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true
+    # past that point. IMPORTANT: Only wipe beaconchaindata, blobs, and
+    # data-columns.  Preserve discovery/ (peer database) and network-keys
+    # (--p2p-static-id), otherwise Prysm loses all peers after initial sync.
+    log "  Wiping Prysm CL beacon database (preserving discovery + keys)..."
+    docker run --rm -v "$DATA_DIR/node3/cl:/data" alpine \
+        sh -c "rm -rf /data/beaconchaindata /data/blobs /data/data-columns" 2>/dev/null || true
 
     # Restart Besu first (same data, same config -- just resets forkchoice)
     log "  Restarting Besu (forkchoice reset)..."
