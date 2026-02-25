@@ -836,10 +836,25 @@ if [ ! -f "$GENERATED_DIR/prefunded_accounts.txt" ]; then
     exit 1
 fi
 
+load_config
+
+# Filter out blockscout if disabled
+BLOCKSCOUT_ENABLED=$(read_config_default "blockscout_enabled" "true")
+if [ "$BLOCKSCOUT_ENABLED" != "true" ] && [ "$BLOCKSCOUT_ENABLED" != "True" ]; then
+    local_filtered=()
+    for c in "${COMPONENTS[@]}"; do
+        if [ "$c" = "blockscout" ]; then
+            log "Blockscout disabled via config (blockscout_enabled: false) -- skipping"
+        else
+            local_filtered+=("$c")
+        fi
+    done
+    COMPONENTS=("${local_filtered[@]}")
+fi
+
 ORDERED=($(ordered_components))
 log "=== Starting components: ${ORDERED[*]} ==="
 
-load_config
 ensure_network
 
 log "Pulling Docker images..."

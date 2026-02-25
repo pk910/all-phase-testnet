@@ -137,7 +137,10 @@ echo ""
 echo "Services:"
 echo "  Dora explorer:      http://localhost:8090"
 echo "  Spamoor:            http://localhost:8091"
+BLOCKSCOUT_ENABLED=$(read_config_default "blockscout_enabled" "true")
+if [ "$BLOCKSCOUT_ENABLED" = "true" ] || [ "$BLOCKSCOUT_ENABLED" = "True" ]; then
 echo "  Blockscout:         http://localhost:3000"
+fi
 echo ""
 echo "EL RPC:"
 echo "  Node 1 (geth):      http://localhost:8545"

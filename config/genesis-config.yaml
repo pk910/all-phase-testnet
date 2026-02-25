@@ -73,6 +73,7 @@ spamoor_startup_spammers:
       max_wallets: 20
 
 # Blockscout
+blockscout_enabled: true                  # set false to skip launching blockscout (saves resources)
 blockscout_image: "ghcr.io/blockscout/blockscout:latest"
 blockscout_frontend_image: "ghcr.io/blockscout/frontend:latest"
 blockscout_verif_image: "ghcr.io/blockscout/smart-contract-verifier:latest"
