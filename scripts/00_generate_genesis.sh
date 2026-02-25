@@ -367,6 +367,7 @@ chainspec = {
         "accountStartNonce": "0x0",
         "maximumExtraDataSize": "0xffff",
         "minGasLimit": "0x1388",
+        "chainID": CHAIN_ID_HEX,
         "networkID": CHAIN_ID_HEX,
         "maxCodeSize": "0x6000",
         "maxCodeSizeTransition": "0x0",

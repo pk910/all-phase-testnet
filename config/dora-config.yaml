@@ -26,6 +26,8 @@ beaconapi:
       name: "Prysm"
     - url: "http://allphase-node4-cl:5052"
       name: "Teku"
+    - url: "http://allphase-node5-cl:5052"
+      name: "Grandine"
 
 executionapi:
   endpoints:
@@ -37,6 +39,8 @@ executionapi:
       name: "Besu"
     - url: "http://allphase-node4-el:8545"
       name: "Reth"
+    - url: "http://allphase-node5-el:8545"
+      name: "Nethermind"
   depositLogBatchSize: 1000
 
 indexer:

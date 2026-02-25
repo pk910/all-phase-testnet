@@ -14,10 +14,10 @@ DOCKER_NETWORK="allphase-testnet"
 CONTAINER_PREFIX="allphase"
 
 # Node count
-NODE_COUNT=4
+NODE_COUNT=5
 
 # All valid component names (start order matters: node2 depends on node1+node3)
-ALL_COMPONENTS="node1 node3 node4 node2 dora spamoor blockscout"
+ALL_COMPONENTS="node1 node3 node4 node5 node2 dora spamoor blockscout"
 
 # Static IPs for all containers
 NODE1_EL_IP="172.30.0.10"
@@ -28,6 +28,8 @@ NODE3_EL_IP="172.30.0.30"
 NODE3_CL_IP="172.30.0.31"
 NODE4_EL_IP="172.30.0.40"
 NODE4_CL_IP="172.30.0.41"
+NODE5_EL_IP="172.30.0.50"
+NODE5_CL_IP="172.30.0.51"
 BLOCKSCOUT_DB_IP="172.30.0.60"
 BLOCKSCOUT_BACKEND_IP="172.30.0.61"
 BLOCKSCOUT_VERIF_IP="172.30.0.62"
@@ -108,6 +110,7 @@ containers_for_component() {
         node2) echo "${CONTAINER_PREFIX}-node2-el ${CONTAINER_PREFIX}-node2-cl ${CONTAINER_PREFIX}-node2-vc" ;;
         node3) echo "${CONTAINER_PREFIX}-node3-el ${CONTAINER_PREFIX}-node3-cl ${CONTAINER_PREFIX}-node3-vc" ;;
         node4) echo "${CONTAINER_PREFIX}-node4-el ${CONTAINER_PREFIX}-node4-cl" ;;
+        node5) echo "${CONTAINER_PREFIX}-node5-el ${CONTAINER_PREFIX}-node5-cl" ;;
         dora) echo "${CONTAINER_PREFIX}-dora" ;;
         spamoor) echo "${CONTAINER_PREFIX}-spamoor" ;;
         blockscout) echo "${CONTAINER_PREFIX}-blockscout-db ${CONTAINER_PREFIX}-blockscout-verif ${CONTAINER_PREFIX}-blockscout ${CONTAINER_PREFIX}-blockscout-frontend" ;;
@@ -188,5 +191,15 @@ get_node4_enode() {
         -d '{"method":"admin_nodeInfo","params":[],"id":1,"jsonrpc":"2.0"}' 2>/dev/null | jq -r '.result.enode' || echo "")
     if [ -n "$enode" ] && [ "$enode" != "null" ]; then
         echo "$enode" | sed "s/@[^:]*:/@${NODE4_EL_IP}:/"
+    fi
+}
+
+# Get node5 EL enode (returns empty if not running)
+get_node5_enode() {
+    local enode
+    enode=$(curl -s "http://${NODE5_EL_IP}:8545" -X POST -H 'Content-Type: application/json' \
+        -d '{"method":"admin_nodeInfo","params":[],"id":1,"jsonrpc":"2.0"}' 2>/dev/null | jq -r '.result.enode' || echo "")
+    if [ -n "$enode" ] && [ "$enode" != "null" ]; then
+        echo "$enode" | sed "s/@[^:]*:/@${NODE5_EL_IP}:/"
     fi
 }
