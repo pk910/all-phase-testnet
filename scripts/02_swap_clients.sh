@@ -1346,15 +1346,12 @@ swap_node3_cl_refresh() {
     docker rm -f "${CONTAINER_PREFIX}-node3-el" >/dev/null 2>&1 || true
     sleep 2
 
-    # Wipe Prysm CL beacon database so it syncs fresh from genesis.
-    # This avoids the stale-head issue where Prysm loads an old DB head,
-    # sends it to Besu via FCU, and gets INVALID because Besu has finalized
-    # past that point. IMPORTANT: Only wipe beaconchaindata, blobs, and
-    # data-columns.  Preserve discovery/ (peer database) and network-keys
-    # (--p2p-static-id), otherwise Prysm loses all peers after initial sync.
-    log "  Wiping Prysm CL beacon database (preserving discovery + keys)..."
-    docker run --rm -v "$DATA_DIR/node3/cl:/data" alpine \
-        sh -c "rm -rf /data/beaconchaindata /data/blobs /data/data-columns" 2>/dev/null || true
+    # NOTE: We do NOT wipe Prysm's DB. Prysm will restart with its existing
+    # head (~Electra boundary) and batch-sync forward. It may log a transient
+    # "invalid forkchoice state" error from Besu, but this is non-fatal and
+    # Prysm continues syncing past it. Wiping the DB causes Prysm to start
+    # from slot 0, which breaks gossip topic subscriptions (wrong fork digest)
+    # and leads to permanent peer loss.
 
     # Restart Besu first (same data, same config -- just resets forkchoice)
     log "  Restarting Besu (forkchoice reset)..."
@@ -1396,8 +1393,8 @@ swap_node3_cl_refresh() {
 
     wait_for_el "$NODE3_EL_IP" "node3"
 
-    # Restart Prysm beacon (clean DB, fresh bootnodes)
-    log "  Restarting Prysm with clean DB and fresh bootnodes..."
+    # Restart Prysm beacon (preserved DB, fresh bootnodes)
+    log "  Restarting Prysm with existing DB and fresh bootnodes..."
     docker run -d --name "${CONTAINER_PREFIX}-node3-cl" \
         --network "$DOCKER_NETWORK" --ip "$NODE3_CL_IP" \
         -u "$DOCKER_UID" \
@@ -1446,7 +1443,30 @@ swap_node3_cl_refresh() {
         --beacon-rpc-provider="${CONTAINER_PREFIX}-node3-cl:4000" \
         --suggested-fee-recipient="$ETHERBASE"
 
-    wait_for_cl_peers "$NODE3_CL_IP" "3500" "node3" 2 60
+    # Wait for Prysm to catch up to head (not just peers -- it needs time
+    # to batch-sync from its old head to the current chain head).
+    log "  Waiting for Prysm to sync to head (up to 180s)..."
+    local head_ok=false
+    for i in $(seq 1 60); do
+        local prysm_slot ref_slot
+        prysm_slot=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/head" 2>/dev/null \
+            | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        ref_slot=$(curl -s --max-time 2 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null \
+            | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        [ "$prysm_slot" = "null" ] && prysm_slot=0
+        [ "$ref_slot" = "null" ] && ref_slot=0
+        local gap=$((ref_slot - prysm_slot))
+        if [ "$gap" -le 3 ] && [ "$prysm_slot" -gt 0 ]; then
+            log "  Prysm synced to slot $prysm_slot (gap: $gap)"
+            head_ok=true
+            break
+        fi
+        [ $((i % 10)) -eq 0 ] && log "  Prysm at slot $prysm_slot, head at $ref_slot (gap: $gap)..."
+        sleep 3
+    done
+    if ! $head_ok; then
+        log "  WARNING: Prysm did not fully catch up (may recover via gossip)"
+    fi
 
     mark_swapped "node3-cl-refresh"
     log "  Node 3 CL (Prysm) bootnode refresh complete."
