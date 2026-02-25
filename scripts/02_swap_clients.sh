@@ -152,6 +152,7 @@ load_config() {
     CL_IMAGE_OLD_TEKU=$(read_config "cl_image_old_teku")
     CL_IMAGE_TEKU=$(read_config "cl_image_teku")
     CL_IMAGE_PRYSM_BEACON=$(read_config "cl_image_prysm_beacon")
+    CL_IMAGE_PRYSM_VALIDATOR=$(read_config "cl_image_prysm_validator")
     EL_IMAGE_NETHERMIND=$(read_config "el_image_nethermind")
 
     BELLATRIX_EPOCH=$(read_config "bellatrix_fork_epoch")
@@ -1345,6 +1346,14 @@ swap_node3_cl_refresh() {
     docker rm -f "${CONTAINER_PREFIX}-node3-el" >/dev/null 2>&1 || true
     sleep 2
 
+    # Wipe Prysm CL database so it syncs fresh from genesis.
+    # This avoids the stale-head issue where Prysm loads an old DB head,
+    # sends it to Besu via FCU, and gets INVALID because Besu has finalized
+    # past that point. Using a docker container for cleanup because the
+    # files may be owned by a different UID.
+    log "  Wiping Prysm CL database for clean sync..."
+    docker run --rm -v "$DATA_DIR/node3/cl:/data" alpine sh -c "rm -rf /data/*" 2>/dev/null || true
+
     # Restart Besu first (same data, same config -- just resets forkchoice)
     log "  Restarting Besu (forkchoice reset)..."
     local node1_enode node2_enode besu_bootnodes=""
@@ -1385,8 +1394,8 @@ swap_node3_cl_refresh() {
 
     wait_for_el "$NODE3_EL_IP" "node3"
 
-    # Restart Prysm beacon (same data, new bootnodes)
-    log "  Restarting Prysm with fresh bootnodes..."
+    # Restart Prysm beacon (clean DB, fresh bootnodes)
+    log "  Restarting Prysm with clean DB and fresh bootnodes..."
     docker run -d --name "${CONTAINER_PREFIX}-node3-cl" \
         --network "$DOCKER_NETWORK" --ip "$NODE3_CL_IP" \
         -u "$DOCKER_UID" \
