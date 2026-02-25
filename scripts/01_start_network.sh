@@ -227,7 +227,7 @@ start_node1() {
         --enr-udp-port=9000 \
         --enr-tcp-port=9000 \
         --port=9000 \
-        --target-peers=2 \
+        --target-peers=100 \
         --subscribe-all-subnets
 
     log "  Lighthouse container: ${CONTAINER_PREFIX}-node1-cl"
@@ -492,7 +492,7 @@ start_node4() {
         --p2p-port=9000 \
         --p2p-advertised-ip="$NODE4_CL_IP" \
         --p2p-discovery-site-local-addresses-enabled=true \
-        --p2p-peer-lower-bound=1 \
+        --p2p-peer-lower-bound=64 \
         --p2p-subscribe-all-subnets-enabled=true \
         --validator-keys=/keys/teku-keys:/keys/teku-secrets \
         --validators-proposer-default-fee-recipient="$ETHERBASE" \
@@ -637,7 +637,7 @@ start_node5() {
         --enr-tcp-port 9000 \
         --enr-udp-port 9000 \
         --enable-private-discovery \
-        --target-peers 4 \
+        --target-peers 100 \
         --subscribe-all-subnets \
         $grandine_bootnodes
 
@@ -759,7 +759,7 @@ start_node2() {
         --enr.ip="$NODE2_CL_IP" \
         --enr.tcp=9000 \
         --enr.udp=9000 \
-        --targetPeers=2 \
+        --targetPeers=100 \
         --suggestedFeeRecipient="$ETHERBASE" \
         --subscribeAllSubnets \
         $bootnode_args

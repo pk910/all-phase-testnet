@@ -609,7 +609,7 @@ swap_node2_cl() {
         --enr.ip="$NODE2_CL_IP" \
         --enr.tcp=9000 \
         --enr.udp=9000 \
-        --targetPeers=2 \
+        --targetPeers=100 \
         --suggestedFeeRecipient="$ETHERBASE" \
         --subscribeAllSubnets \
         $bootnode_args
@@ -685,7 +685,7 @@ swap_node1_cl_mid() {
         --enr-udp-port=9000 \
         --enr-tcp-port=9000 \
         --port=9000 \
-        --target-peers=2 \
+        --target-peers=100 \
         --subscribe-all-subnets
 
     wait_for_cl "$NODE1_CL_IP" "5052" "node1"
@@ -783,12 +783,12 @@ swap_node1_cl() {
         --enr-udp-port=9000 \
         --enr-tcp-port=9000 \
         --port=9000 \
-        --target-peers=2 \
+        --target-peers=100 \
         --subscribe-all-subnets \
         $boot_nodes
 
     wait_for_cl "$NODE1_CL_IP" "5052" "node1"
-    wait_for_cl_peers "$NODE1_CL_IP" "5052" "node1" 2 30
+    wait_for_cl_peers "$NODE1_CL_IP" "5052" "node1" 3 30
 
     # Start new lighthouse validator
     log "  Starting new lighthouse validator..."
@@ -1177,14 +1177,14 @@ swap_node4_cl() {
         --p2p-port=9000 \
         --p2p-advertised-ip="$NODE4_CL_IP" \
         --p2p-discovery-site-local-addresses-enabled=true \
-        --p2p-peer-lower-bound=1 \
+        --p2p-peer-lower-bound=64 \
         --p2p-subscribe-all-subnets-enabled=true \
         --validator-keys=/keys/teku-keys:/keys/teku-secrets \
         --validators-proposer-default-fee-recipient="$ETHERBASE" \
         $teku_bootnodes
 
     wait_for_cl "$NODE4_CL_IP" "5052" "node4"
-    wait_for_cl_peers "$NODE4_CL_IP" "5052" "node4" 2 30
+    wait_for_cl_peers "$NODE4_CL_IP" "5052" "node4" 3 30
 
     mark_swapped "node4-cl"
     log "  Node 4 CL swap complete."
@@ -1311,52 +1311,75 @@ swap_node3_cl_refresh() {
     log ""
     log "=== Verifying Node 3 CL (Prysm) health after CL swaps ==="
 
-    # After the other CL nodes (Lighthouse, Lodestar, Teku) were swapped,
-    # those new nodes received Prysm's ENR as a bootnode, so they connect
-    # to Prysm via incoming connections. Prysm also discovers them via
-    # discv5. We do NOT restart Prysm because:
-    #   1. Restarting causes Prysm to lose all peers and gossip subscriptions
-    #   2. Prysm's stale head + Besu's FCU puts it in optimistic mode
-    #   3. The monitoring data shows Prysm stays synced through CL swaps
-    # Instead, just verify Prysm is healthy and synced.
+    # After the other CL nodes were swapped with target-peers=100,
+    # they will actively discover and connect to Prysm via its ENR bootnode.
+    # We verify Prysm has adequate peers and is on the canonical chain
+    # (matching block roots, not just slot numbers).
 
-    local prysm_slot ref_slot peers
-    prysm_slot=$(curl -s --max-time 3 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/head" 2>/dev/null \
-        | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
-    ref_slot=$(curl -s --max-time 3 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null \
-        | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
-    peers=$(curl -s --max-time 3 "http://${NODE3_CL_IP}:3500/eth/v1/node/peer_count" 2>/dev/null \
-        | jq -r '.data.connected' 2>/dev/null || echo "0")
-    [ "$prysm_slot" = "null" ] && prysm_slot=0
-    [ "$ref_slot" = "null" ] && ref_slot=0
-    [ "$peers" = "null" ] && peers=0
-    local gap=$((ref_slot - prysm_slot))
+    local prysm_slot ref_slot peers prysm_root ref_root gap
 
-    log "  Prysm: slot=$prysm_slot (head=$ref_slot, gap=$gap, peers=$peers)"
+    # Step 1: Wait for Prysm to have >= 3 peers (up to 120s)
+    log "  Waiting for Prysm to establish peers (need >= 3)..."
+    local peer_ok=false
+    for i in $(seq 1 40); do
+        peers=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/node/peer_count" 2>/dev/null \
+            | jq -r '.data.connected' 2>/dev/null || echo "0")
+        [ "$peers" = "null" ] && peers=0
+        if [ "$peers" -ge 3 ]; then
+            log "  Prysm peers: $peers (OK)"
+            peer_ok=true
+            break
+        fi
+        [ $((i % 10)) -eq 0 ] && log "  Prysm peers: $peers (waiting... ${i}s/120s)"
+        sleep 3
+    done
+    if ! $peer_ok; then
+        log "  WARNING: Prysm only has $peers peers after 120s"
+    fi
 
-    if [ "$gap" -le 5 ] && [ "$prysm_slot" -gt 0 ] && [ "$peers" -ge 1 ]; then
-        log "  Prysm is healthy and synced -- no restart needed."
-    else
-        log "  WARNING: Prysm may be behind or low on peers (gap=$gap, peers=$peers)"
-        log "  Waiting up to 60s for recovery..."
-        for i in $(seq 1 20); do
-            sleep 3
-            prysm_slot=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/head" 2>/dev/null \
-                | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
-            ref_slot=$(curl -s --max-time 2 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null \
-                | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
-            [ "$prysm_slot" = "null" ] && prysm_slot=0
-            [ "$ref_slot" = "null" ] && ref_slot=0
-            gap=$((ref_slot - prysm_slot))
-            if [ "$gap" -le 5 ] && [ "$prysm_slot" -gt 0 ]; then
-                log "  Prysm recovered: slot=$prysm_slot (gap=$gap)"
-                break
-            fi
-        done
+    # Step 2: Verify Prysm is on the canonical chain (compare block roots)
+    log "  Verifying chain agreement (block roots)..."
+    local chain_ok=false
+    for i in $(seq 1 20); do
+        # Get finalized slot as a safe comparison point
+        local fin_data=$(curl -s --max-time 2 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/finalized" 2>/dev/null)
+        local fin_slot=$(echo "$fin_data" | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        local fin_root=$(echo "$fin_data" | jq -r '.data.root' 2>/dev/null || echo "")
+        [ "$fin_slot" = "null" ] && fin_slot=0
+
+        # Check Prysm agrees on the finalized block root
+        local prysm_fin=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/finalized" 2>/dev/null)
+        local prysm_fin_slot=$(echo "$prysm_fin" | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        local prysm_fin_root=$(echo "$prysm_fin" | jq -r '.data.root' 2>/dev/null || echo "")
+        [ "$prysm_fin_slot" = "null" ] && prysm_fin_slot=0
+
+        # Also check head slot gap
+        prysm_slot=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/head" 2>/dev/null \
+            | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        ref_slot=$(curl -s --max-time 2 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null \
+            | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        [ "$prysm_slot" = "null" ] && prysm_slot=0
+        [ "$ref_slot" = "null" ] && ref_slot=0
+        gap=$((ref_slot - prysm_slot))
+
+        if [ "$fin_root" = "$prysm_fin_root" ] && [ -n "$fin_root" ] && [ "$fin_root" != "null" ] \
+           && [ "$gap" -le 5 ] && [ "$prysm_slot" -gt 0 ]; then
+            log "  Prysm chain OK: slot=$prysm_slot (gap=$gap) finalized=$prysm_fin_slot (root matches)"
+            chain_ok=true
+            break
+        fi
+
+        [ $((i % 5)) -eq 0 ] && log "  Chain check: prysm_slot=$prysm_slot gap=$gap fin_match=$([ "$fin_root" = "$prysm_fin_root" ] && echo yes || echo NO) (${i}/20)"
+        sleep 3
+    done
+
+    if ! $chain_ok; then
+        log "  WARNING: Prysm may be on a fork (gap=$gap, peers=$peers)"
+        log "  Chain will likely self-heal via fork choice but monitor closely"
     fi
 
     mark_swapped "node3-cl-refresh"
-    log "  Node 3 CL (Prysm) bootnode refresh complete."
+    log "  Node 3 CL (Prysm) health verification complete."
 }
 
 #############################################################################
