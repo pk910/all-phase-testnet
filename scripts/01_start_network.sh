@@ -596,13 +596,26 @@ start_node5() {
 
     # Grandine (combined beacon + validator from genesis)
     # Supports all forks (Phase0 through Fulu), no swap needed.
+    # Grandine expects flat keystore files, not EIP-2335 subdirectories.
+    # Flatten: keys/0xpub/voting-keystore.json -> grandine-keys/0xpub.json
+    log "  Preparing flat keystore for Grandine..."
+    local grandine_keys_dir="$DATA_DIR/node5/grandine-keys"
+    rm -rf "$grandine_keys_dir"
+    mkdir -p "$grandine_keys_dir/keys" "$grandine_keys_dir/secrets"
+    for pubkey_dir in "$GENERATED_DIR/keys/node5/keys"/0x*; do
+        local pubkey
+        pubkey=$(basename "$pubkey_dir")
+        cp "$pubkey_dir/voting-keystore.json" "$grandine_keys_dir/keys/${pubkey}.json"
+        cp "$GENERATED_DIR/keys/node5/secrets/${pubkey}" "$grandine_keys_dir/secrets/${pubkey}.txt"
+    done
+
     log "  Starting grandine (beacon + validator)..."
     docker run -d --name "${CONTAINER_PREFIX}-node5-cl" \
         --network "$DOCKER_NETWORK" --ip "$NODE5_CL_IP" \
         -v "$DATA_DIR/node5/cl:/data" \
         -v "$GENERATED_DIR/cl:/cl-config" \
         -v "$JWT_SECRET:/jwt" \
-        -v "$GENERATED_DIR/keys/node5:/keys" \
+        -v "$grandine_keys_dir:/keys" \
         -p 5056:5052 -p 9004:9000 -p 9004:9000/udp \
         "$CL_IMAGE_GRANDINE" \
         --network custom \
@@ -623,6 +636,7 @@ start_node5() {
         --enr-address "$NODE5_CL_IP" \
         --enr-tcp-port 9000 \
         --enr-udp-port 9000 \
+        --enable-private-discovery \
         --target-peers 4 \
         --subscribe-all-subnets \
         $grandine_bootnodes
