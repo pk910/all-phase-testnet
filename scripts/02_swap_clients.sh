@@ -1309,163 +1309,50 @@ swap_node3_cl_refresh() {
     fi
 
     log ""
-    log "=== Refreshing Node 3 CL (Prysm) bootnodes ==="
+    log "=== Verifying Node 3 CL (Prysm) health after CL swaps ==="
 
-    # Collect ENRs from all other (already swapped) CL nodes
-    local node1_cl_enr node2_cl_enr node4_cl_enr node5_cl_enr boot_enrs=""
-    node1_cl_enr=$(curl -s "http://${NODE1_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
-    node2_cl_enr=$(curl -s "http://${NODE2_CL_IP}:5051/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
-    node4_cl_enr=$(curl -s "http://${NODE4_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
-    node5_cl_enr=$(curl -s "http://${NODE5_CL_IP}:5052/eth/v1/node/identity" 2>/dev/null | jq -r '.data.enr' || echo "")
-    for enr in "$node1_cl_enr" "$node2_cl_enr" "$node4_cl_enr" "$node5_cl_enr"; do
-        if [ -n "$enr" ] && [ "$enr" != "null" ]; then
-            boot_enrs="${boot_enrs:+$boot_enrs,}$enr"
-        fi
-    done
+    # After the other CL nodes (Lighthouse, Lodestar, Teku) were swapped,
+    # those new nodes received Prysm's ENR as a bootnode, so they connect
+    # to Prysm via incoming connections. Prysm also discovers them via
+    # discv5. We do NOT restart Prysm because:
+    #   1. Restarting causes Prysm to lose all peers and gossip subscriptions
+    #   2. Prysm's stale head + Besu's FCU puts it in optimistic mode
+    #   3. The monitoring data shows Prysm stays synced through CL swaps
+    # Instead, just verify Prysm is healthy and synced.
 
-    local prysm_bootnodes=""
-    for enr in "$node1_cl_enr" "$node2_cl_enr" "$node4_cl_enr" "$node5_cl_enr"; do
-        if [ -n "$enr" ] && [ "$enr" != "null" ]; then
-            prysm_bootnodes="$prysm_bootnodes --bootstrap-node=$enr"
-        fi
-    done
-    if [ -n "$prysm_bootnodes" ]; then
-        log "  Fresh bootnodes: $(echo $prysm_bootnodes | wc -w) ENRs"
+    local prysm_slot ref_slot peers
+    prysm_slot=$(curl -s --max-time 3 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/head" 2>/dev/null \
+        | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+    ref_slot=$(curl -s --max-time 3 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null \
+        | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+    peers=$(curl -s --max-time 3 "http://${NODE3_CL_IP}:3500/eth/v1/node/peer_count" 2>/dev/null \
+        | jq -r '.data.connected' 2>/dev/null || echo "0")
+    [ "$prysm_slot" = "null" ] && prysm_slot=0
+    [ "$ref_slot" = "null" ] && ref_slot=0
+    [ "$peers" = "null" ] && peers=0
+    local gap=$((ref_slot - prysm_slot))
+
+    log "  Prysm: slot=$prysm_slot (head=$ref_slot, gap=$gap, peers=$peers)"
+
+    if [ "$gap" -le 5 ] && [ "$prysm_slot" -gt 0 ] && [ "$peers" -ge 1 ]; then
+        log "  Prysm is healthy and synced -- no restart needed."
     else
-        log "  WARNING: No CL ENRs found!"
-    fi
-
-    # Stop Prysm beacon, validator, AND Besu.
-    # IMPORTANT: Besu must also restart so its forkchoice state is fresh.
-    # If only Prysm restarts, it sends its old head to Besu via FCU. Besu
-    # may have already finalized past that point and returns INVALID, putting
-    # Prysm in unrecoverable optimistic mode with no peers.
-    log "  Stopping Prysm + Besu for coordinated restart..."
-    docker rm -f "${CONTAINER_PREFIX}-node3-vc" >/dev/null 2>&1 || true
-    docker rm -f "${CONTAINER_PREFIX}-node3-cl" >/dev/null 2>&1 || true
-    docker rm -f "${CONTAINER_PREFIX}-node3-el" >/dev/null 2>&1 || true
-    sleep 2
-
-    # NOTE: We do NOT wipe Prysm's DB. Prysm will restart with its existing
-    # head (~Electra boundary) and batch-sync forward. It may log a transient
-    # "invalid forkchoice state" error from Besu, but this is non-fatal and
-    # Prysm continues syncing past it. Wiping the DB causes Prysm to start
-    # from slot 0, which breaks gossip topic subscriptions (wrong fork digest)
-    # and leads to permanent peer loss.
-
-    # Restart Besu first (same data, same config -- just resets forkchoice)
-    log "  Restarting Besu (forkchoice reset)..."
-    local node1_enode node2_enode besu_bootnodes=""
-    node1_enode=$(get_node1_enode)
-    node2_enode=$(get_node2_enode)
-    for enode in "$node1_enode" "$node2_enode"; do
-        if [ -n "$enode" ]; then
-            besu_bootnodes="${besu_bootnodes:+$besu_bootnodes,}$enode"
-        fi
-    done
-
-    docker run -d --name "${CONTAINER_PREFIX}-node3-el" \
-        --network "$DOCKER_NETWORK" --ip "$NODE3_EL_IP" \
-        -v "$DATA_DIR/node3/el:/data" \
-        -v "$GENERATED_DIR/el/besu-genesis.json:/genesis.json" \
-        -v "$JWT_SECRET:/jwt" \
-        -p 8547:8545 -p 8553:8551 -p 30305:30303 -p 30305:30303/udp \
-        "$EL_IMAGE_NEW_BESU" \
-        --genesis-file=/genesis.json \
-        --data-path=/data \
-        --network-id="$CHAIN_ID" \
-        --rpc-http-enabled \
-        --rpc-http-host=0.0.0.0 --rpc-http-port=8545 \
-        --rpc-http-api=ETH,NET,WEB3,DEBUG,TRACE,ADMIN,TXPOOL \
-        --rpc-http-cors-origins="*" \
-        --host-allowlist="*" \
-        --engine-rpc-port=8551 \
-        --engine-host-allowlist="*" \
-        --engine-jwt-secret=/jwt \
-        --p2p-host="$NODE3_EL_IP" \
-        --p2p-port=30303 \
-        --nat-method=NONE \
-        --sync-mode=FULL \
-        --data-storage-format=BONSAI \
-        --target-gas-limit=30000000 \
-        --bonsai-parallel-tx-processing-enabled=false \
-        ${besu_bootnodes:+--bootnodes="$besu_bootnodes"}
-
-    wait_for_el "$NODE3_EL_IP" "node3"
-
-    # Restart Prysm beacon (preserved DB, fresh bootnodes)
-    log "  Restarting Prysm with existing DB and fresh bootnodes..."
-    docker run -d --name "${CONTAINER_PREFIX}-node3-cl" \
-        --network "$DOCKER_NETWORK" --ip "$NODE3_CL_IP" \
-        -u "$DOCKER_UID" \
-        -e HOME=/tmp \
-        -v "$DATA_DIR/node3/cl:/data" \
-        -v "$GENERATED_DIR/cl:/cl-config" \
-        -v "$JWT_SECRET:/jwt" \
-        -p 5054:3500 -p 9002:13000 -p 9002:12000/udp \
-        "$CL_IMAGE_PRYSM_BEACON" \
-        --accept-terms-of-use=true \
-        --chain-config-file=/cl-config/config.yaml \
-        --genesis-state=/cl-config/genesis.ssz \
-        --datadir=/data \
-        --execution-endpoint="http://${CONTAINER_PREFIX}-node3-el:8551" \
-        --jwt-secret=/jwt \
-        --contract-deployment-block=0 \
-        --rpc-host=0.0.0.0 --rpc-port=4000 \
-        --http-host=0.0.0.0 --http-port=3500 \
-        --http-cors-domain="*" \
-        --p2p-host-ip="$NODE3_CL_IP" \
-        --p2p-tcp-port=13000 --p2p-udp-port=12000 \
-        --p2p-static-id=true \
-        --min-sync-peers=0 \
-        --subscribe-all-subnets=true \
-        --suggested-fee-recipient="$ETHERBASE" \
-        $prysm_bootnodes
-
-    wait_for_cl "$NODE3_CL_IP" "3500" "node3"
-
-    # Restart Prysm validator
-    log "  Restarting Prysm validator..."
-    docker rm -f "${CONTAINER_PREFIX}-node3-vc" >/dev/null 2>&1 || true
-    docker run -d --name "${CONTAINER_PREFIX}-node3-vc" \
-        --network "$DOCKER_NETWORK" \
-        -u "$DOCKER_UID" \
-        -e HOME=/tmp \
-        -v "$DATA_DIR/node3/vc:/data" \
-        -v "$GENERATED_DIR/cl:/cl-config" \
-        -v "$GENERATED_DIR/keys/node3:/keys" \
-        -v "$GENERATED_DIR/keys/prysm-password.txt:/prysm-password.txt" \
-        "$CL_IMAGE_PRYSM_VALIDATOR" \
-        --accept-terms-of-use=true \
-        --chain-config-file=/cl-config/config.yaml \
-        --wallet-dir=/keys/prysm \
-        --wallet-password-file=/prysm-password.txt \
-        --beacon-rpc-provider="${CONTAINER_PREFIX}-node3-cl:4000" \
-        --suggested-fee-recipient="$ETHERBASE"
-
-    # Wait for Prysm to catch up to head (not just peers -- it needs time
-    # to batch-sync from its old head to the current chain head).
-    log "  Waiting for Prysm to sync to head (up to 180s)..."
-    local head_ok=false
-    for i in $(seq 1 60); do
-        local prysm_slot ref_slot
-        prysm_slot=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/head" 2>/dev/null \
-            | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
-        ref_slot=$(curl -s --max-time 2 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null \
-            | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
-        [ "$prysm_slot" = "null" ] && prysm_slot=0
-        [ "$ref_slot" = "null" ] && ref_slot=0
-        local gap=$((ref_slot - prysm_slot))
-        if [ "$gap" -le 3 ] && [ "$prysm_slot" -gt 0 ]; then
-            log "  Prysm synced to slot $prysm_slot (gap: $gap)"
-            head_ok=true
-            break
-        fi
-        [ $((i % 10)) -eq 0 ] && log "  Prysm at slot $prysm_slot, head at $ref_slot (gap: $gap)..."
-        sleep 3
-    done
-    if ! $head_ok; then
-        log "  WARNING: Prysm did not fully catch up (may recover via gossip)"
+        log "  WARNING: Prysm may be behind or low on peers (gap=$gap, peers=$peers)"
+        log "  Waiting up to 60s for recovery..."
+        for i in $(seq 1 20); do
+            sleep 3
+            prysm_slot=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/head" 2>/dev/null \
+                | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+            ref_slot=$(curl -s --max-time 2 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null \
+                | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+            [ "$prysm_slot" = "null" ] && prysm_slot=0
+            [ "$ref_slot" = "null" ] && ref_slot=0
+            gap=$((ref_slot - prysm_slot))
+            if [ "$gap" -le 5 ] && [ "$prysm_slot" -gt 0 ]; then
+                log "  Prysm recovered: slot=$prysm_slot (gap=$gap)"
+                break
+            fi
+        done
     fi
 
     mark_swapped "node3-cl-refresh"
