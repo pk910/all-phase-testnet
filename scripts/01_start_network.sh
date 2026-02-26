@@ -20,7 +20,7 @@ Components:
   node2       Geth v1.11.6 (sync) + Lodestar + Lodestar VC
   node3       Besu 24.10.0 (mining) + Prysm + Prysm VC
   node4       Geth v1.11.6 (sync) + Teku 25.1.0 (combined beacon+validator)
-  node5       Geth v1.11.6 (sync) + Grandine (combined beacon+validator)
+  node5       Geth v1.11.6 (sync) + Grandine (EL: geth->nethermind, CL: no swap)
   dora        Dora block explorer
   spamoor     Spamoor transaction spammer
   blockscout  Blockscout explorer (postgres + verifier + backend + frontend)
@@ -502,7 +502,7 @@ start_node4() {
 }
 
 start_node5() {
-    log "Starting Node 5: Geth (sync) + Grandine..."
+    log "Starting Node 5: Geth v1.11.6 + Grandine..."
 
     # Clean & prepare data dirs
     docker run --rm -v "$DATA_DIR:/hostdata" alpine rm -rf /hostdata/node5 2>/dev/null || true
@@ -512,11 +512,10 @@ start_node5() {
     stop_component node5
 
     # Build EL bootnode list from running nodes
-    local node1_enode node3_enode geth_bootnodes=""
+    local node1_enode node3_enode bootnode_list="" geth_bootnodes=""
     node1_enode=$(get_node1_enode)
     node3_enode=$(get_node3_enode)
 
-    local bootnode_list=""
     if [ -n "$node1_enode" ]; then
         bootnode_list="$node1_enode"
         log "  Node1 enode: $node1_enode"
@@ -534,7 +533,7 @@ start_node5() {
         geth_bootnodes="--bootnodes=$bootnode_list"
     fi
 
-    # Geth init
+    # Geth init (using old geth for PoW chain sync; swapped to geth latest then nethermind later)
     log "  Initializing geth datadir..."
     docker run --rm \
         -u "$DOCKER_UID" \

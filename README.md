@@ -16,7 +16,7 @@ Each node begins with older client versions that support PoW mining and the Merg
 | 2 | Geth v1.11.6 → latest | Lodestar v1.38.0 → latest | 128 |
 | 3 | Besu 24.10.0 → latest | Prysm v7.1.2 (no swap) | 128 |
 | 4 | Geth v1.11.6 → latest → Reth | Teku (old → latest) | 128 |
-| 5 | Geth v1.11.6 → latest | Grandine (no CL swap) | 128 |
+| 5 | Geth v1.11.6 → latest → Nethermind | Grandine (no CL swap) | 128 |
 
 Plus:
 - [Dora](https://github.com/ethpandaops/dora) block explorer (CL-focused)
@@ -32,8 +32,8 @@ The swap daemon automatically upgrades clients at the correct fork boundaries. E
 | node1-el | geth v1.11.6 → latest | Before Deneb | Old geth lacks Cancun/Engine API V3 |
 | node2-el | geth v1.11.6 → latest | Before Deneb | Same as node1 |
 | node3-el | besu 24.10.0 → latest | Before Electra | Old besu has experimental Prague Engine API V4 |
-| node4-el | geth v1.11.6 → latest → Reth | Before Deneb / Before Fulu | Geth swap first, then Reth swap |
-| node5-el | geth v1.11.6 → latest | Before Deneb | Old geth lacks Cancun support |
+| node4-el | geth v1.11.6 → latest → Reth | Before Deneb / At Deneb | Geth swap first, then Reth swap |
+| node5-el | geth v1.11.6 → latest → Nethermind | Before Deneb / At Deneb | Geth swap first, then Nethermind (beacon sync) |
 | node1-cl-mid | lighthouse v5.3.0 → v6.0.0 | Before Deneb | DB migration (schema v21→v22) |
 | node2-cl | lodestar v1.38.0 → latest | AT Electra | v1.38.0 lacks Electra |
 | node4-cl | teku old → latest | Before Electra | Old Teku lacks Electra support |
