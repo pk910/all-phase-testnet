@@ -15,7 +15,13 @@ SLOTS_PER_EPOCH=$(read_config "slots_per_epoch")
 GENESIS_DIFFICULTY=$(read_config "genesis_difficulty")
 GENESIS_GASLIMIT=$(read_config_default "genesis_gaslimit" "30000000")
 VALIDATORS_PER_NODE=$(read_config "validators_per_node")
+GENESIS_VALIDATORS_COUNT=$(read_config_default "genesis_validators_count" "")
 VALIDATOR_MNEMONIC=$(read_config "validator_mnemonic")
+
+# Gated deposit contract
+DEPOSIT_CONTRACT_GATED=$(read_config_default "deposit_contract_gated" "false")
+DEPOSIT_CONTRACT_ADMINS=$(read_config_default "deposit_contract_admins" "[]")
+DEPOSIT_CONTRACT_SETTINGS=$(read_config_default "deposit_contract_settings" "{}")
 
 # Fork epochs
 ALTAIR_FORK_EPOCH=$(read_config "altair_fork_epoch")
@@ -120,21 +126,66 @@ GENESIS_GASLIMIT_HEX="0x$(printf "%x" "$GENESIS_GASLIMIT")"
 GENESIS_TIMESTAMP_HEX="0x$(printf "%x" "$GENESIS_TIMESTAMP")"
 
 # Extract deposit contract from ethereum-genesis-generator docker image
-log "  Extracting deposit contract from ethereum-genesis-generator image..."
-TMPFILE=$(mktemp)
-trap "rm -f $TMPFILE" EXIT
-docker run --rm --entrypoint "" \
-    "ethpandaops/ethereum-genesis-generator:master" \
-    cat /apps/el-gen/system-contracts.yaml > "$TMPFILE" 2>/dev/null
+GENESIS_GEN_IMAGE="ethpandaops/ethereum-genesis-generator:5.3.0"
+TMPDIR_CONTRACTS=$(mktemp -d)
+trap "rm -rf $TMPDIR_CONTRACTS" EXIT
 
-if [ ! -s "$TMPFILE" ]; then
-    log_error "Could not extract system-contracts.yaml from docker image"
-    exit 1
-fi
+if [ "$DEPOSIT_CONTRACT_GATED" = "true" ] || [ "$DEPOSIT_CONTRACT_GATED" = "True" ]; then
+    log "  Extracting GATED deposit contract from genesis-generator image..."
+    docker run --rm --entrypoint "" \
+        "$GENESIS_GEN_IMAGE" \
+        cat /apps/el-gen/gated-deposit-contract.yaml > "$TMPDIR_CONTRACTS/gated.yaml" 2>/dev/null
 
-DEPOSIT_ALLOC=$(python3 -c "
+    if [ ! -s "$TMPDIR_CONTRACTS/gated.yaml" ]; then
+        log_error "Could not extract gated-deposit-contract.yaml from docker image"
+        exit 1
+    fi
+
+    # Parse gated deposit contract and gater contract using Python YAML
+    python3 - "$TMPDIR_CONTRACTS/gated.yaml" << 'PYEOF' > "$TMPDIR_CONTRACTS/parsed.sh"
+import yaml, json, sys, base64
+
+with open(sys.argv[1]) as f:
+    data = yaml.safe_load(f)
+
+deposit = data.get("deposit")
+gater = data.get("deposit_gater")
+gater_addr = data.get("deposit_gater_address", "0x00000000a11acc355c0de0000a11acc355c0de00")
+
+if not deposit or not gater:
+    sys.exit(1)
+
+dep_json = base64.b64encode(json.dumps(deposit).encode()).decode()
+gater_json = base64.b64encode(json.dumps(gater).encode()).decode()
+
+print(f'DEPOSIT_ALLOC_B64="{dep_json}"')
+print(f'GATER_ALLOC_B64="{gater_json}"')
+print(f'GATER_ADDRESS="{gater_addr}"')
+PYEOF
+    source "$TMPDIR_CONTRACTS/parsed.sh"
+    DEPOSIT_ALLOC=$(echo "$DEPOSIT_ALLOC_B64" | base64 -d)
+    GATER_ALLOC=$(echo "$GATER_ALLOC_B64" | base64 -d)
+
+    if [ -z "$DEPOSIT_ALLOC" ] || [ -z "$GATER_ALLOC" ]; then
+        log_error "Could not parse gated deposit contracts"
+        exit 1
+    fi
+    log "  Gated deposit contract: $DEPOSIT_CONTRACT"
+    log "  Gater contract: $GATER_ADDRESS"
+else
+    log "  Extracting standard deposit contract from genesis-generator image..."
+    docker run --rm --entrypoint "" \
+        "$GENESIS_GEN_IMAGE" \
+        cat /apps/el-gen/system-contracts.yaml > "$TMPDIR_CONTRACTS/system.yaml" 2>/dev/null
+
+    if [ ! -s "$TMPDIR_CONTRACTS/system.yaml" ]; then
+        log_error "Could not extract system-contracts.yaml from docker image"
+        exit 1
+    fi
+
+    DEPOSIT_ALLOC=$(python3 -c "
 import json, re, sys
-with open('$TMPFILE') as f:
+with open('$TMPDIR_CONTRACTS/system.yaml') as f:
     content = f.read()
 match = re.search(r'deposit:\s*(\{.*?\n\})', content, re.DOTALL)
 if match:
@@ -142,6 +193,9 @@ if match:
 else:
     sys.exit(1)
 ")
+    GATER_ADDRESS=""
+    GATER_ALLOC=""
+fi
 
 if [ -z "$DEPOSIT_ALLOC" ]; then
     log_error "Could not load deposit contract bytecode"
@@ -158,7 +212,7 @@ log "  Deriving pre-funded accounts from mnemonic..."
 > "$GENERATED_DIR/prefunded_accounts.txt"
 for idx in $(seq 0 $((PREFUND_COUNT - 1))); do
     OUTPUT=$(docker run --rm --entrypoint "" \
-        "ethpandaops/ethereum-genesis-generator:master" \
+        "ethpandaops/ethereum-genesis-generator:5.3.0" \
         geth-hdwallet -mnemonic "$PREFUND_MNEMONIC" -path "m/44'/60'/0'/0/$idx")
     ADDR=$(echo "$OUTPUT" | grep "public address:" | awk '{print $3}')
     KEY=$(echo "$OUTPUT" | grep "private key:" | awk '{print $3}')
@@ -237,6 +291,51 @@ for i in range(256):
 # Add deposit contract
 deposit = json.loads('$DEPOSIT_ALLOC')
 genesis["alloc"]["$DEPOSIT_CONTRACT"] = deposit
+
+# Add gater contract (if gated deposit enabled)
+gater_address = "$GATER_ADDRESS"
+gater_alloc_json = '''$GATER_ALLOC'''
+if gater_address and gater_alloc_json.strip():
+    gater = json.loads(gater_alloc_json)
+    # Add admin addresses to gater storage
+    # Admin role prefix: 0xacce55000000000000000000 + address (20 bytes)
+    # Value 2 = sticky admin
+    admins_json = '''$DEPOSIT_CONTRACT_ADMINS'''
+    admins = json.loads(admins_json) if admins_json.strip() and admins_json.strip() != '[]' else []
+    # Read first prefunded account as default admin
+    with open("$GENERATED_DIR/prefunded_accounts.txt") as f:
+        lines = [l.strip() for l in f if l.strip()]
+        if lines:
+            first_addr = lines[0].split(",")[0].lower()
+            if first_addr.startswith("0x"):
+                first_addr = first_addr[2:]
+            admins.insert(0, "0x" + first_addr)
+    for admin_addr in admins:
+        addr = admin_addr.lower()
+        if addr.startswith("0x"):
+            addr = addr[2:]
+        storage_key = "0xacce55000000000000000000" + addr
+        if "storage" not in gater:
+            gater["storage"] = {}
+        gater["storage"][storage_key] = "0x0000000000000000000000000000000000000000000000000000000000000002"
+    # Add prefix settings
+    settings_json = '''$DEPOSIT_CONTRACT_SETTINGS'''
+    settings = json.loads(settings_json) if settings_json.strip() and settings_json.strip() != '{}' else {}
+    for prefix, value in settings.items():
+        # Gate storage: 0x67617465 ("gate") + zeros + 2-byte prefix
+        pfx = prefix.lower()
+        if pfx.startswith("0x"):
+            pfx = pfx[2:]
+        storage_key = "0x6761746500000000000000000000000000000000000000000000000000" + pfx.zfill(4)
+        gater["storage"][storage_key] = "0x" + hex(int(value))[2:].zfill(64)
+    # Grant DEPOSIT_CONTRACT_ROLE to the deposit contract
+    dep_addr = "$DEPOSIT_CONTRACT".lower()
+    if dep_addr.startswith("0x"):
+        dep_addr = dep_addr[2:]
+    role_key = "0xc0de00000000000000000000" + dep_addr
+    gater["storage"][role_key] = "0x0000000000000000000000000000000000000000000000000000000000000001"
+    genesis["alloc"][gater_address] = gater
+    print(f"  Deployed gater at {gater_address} with {len(admins)} admin(s)")
 
 # Add prefunded accounts
 prefund = json.loads('$PREFUND_ALLOC')
@@ -513,11 +612,20 @@ log "Generating CL config.yaml..."
 
 TOTAL_VALIDATORS=$((VALIDATORS_PER_NODE * NODE_COUNT))
 
+# If genesis_validators_count is set, only include that many in genesis
+if [ -n "$GENESIS_VALIDATORS_COUNT" ] && [ "$GENESIS_VALIDATORS_COUNT" != "null" ]; then
+    GENESIS_VALIDATOR_COUNT=$GENESIS_VALIDATORS_COUNT
+    log "  Genesis validators: $GENESIS_VALIDATOR_COUNT (of $TOTAL_VALIDATORS total)"
+    log "  Remaining $((TOTAL_VALIDATORS - GENESIS_VALIDATOR_COUNT)) validators will be deposited post-genesis"
+else
+    GENESIS_VALIDATOR_COUNT=$TOTAL_VALIDATORS
+fi
+
 cat > "$GENERATED_DIR/cl/config.yaml" << EOF
 PRESET_BASE: 'mainnet'
 CONFIG_NAME: 'allphase-testnet'
 
-MIN_GENESIS_ACTIVE_VALIDATOR_COUNT: $TOTAL_VALIDATORS
+MIN_GENESIS_ACTIVE_VALIDATOR_COUNT: $GENESIS_VALIDATOR_COUNT
 MIN_GENESIS_TIME: $GENESIS_TIMESTAMP
 GENESIS_DELAY: $GENESIS_DELAY
 GENESIS_FORK_VERSION: 0x10000000
@@ -627,10 +735,10 @@ log "  -> deposit_contract_block.txt, deploy_block.txt"
 #############################################################################
 log "Generating CL genesis state (genesis.ssz)..."
 
-# Create mnemonics.yaml
+# Create mnemonics.yaml (only genesis validators go into genesis.ssz)
 cat > "$GENERATED_DIR/cl/mnemonics.yaml" << EOF
 - mnemonic: "$VALIDATOR_MNEMONIC"
-  count: $TOTAL_VALIDATORS
+  count: $GENESIS_VALIDATOR_COUNT
 EOF
 
 # Use the ethereum-genesis-generator docker image which has eth-genesis-state-generator
@@ -639,7 +747,7 @@ docker run --rm \
     -u "$DOCKER_UID" \
     -v "$GENERATED_DIR/cl:/cl" \
     -v "$GENERATED_DIR/el:/el" \
-    "ethpandaops/ethereum-genesis-generator:master" \
+    "ethpandaops/ethereum-genesis-generator:5.3.0" \
     eth-genesis-state-generator beaconchain \
     --config /cl/config.yaml \
     --mnemonics /cl/mnemonics.yaml \
@@ -670,7 +778,7 @@ for i in $(seq 1 $NODE_COUNT); do
         --entrypoint "" \
         -u "$DOCKER_UID" \
         -v "$GENERATED_DIR/keys:/keys" \
-        "ethpandaops/ethereum-genesis-generator:master" \
+        "ethpandaops/ethereum-genesis-generator:5.3.0" \
         sh -c "eth2-val-tools keystores \
             --insecure \
             --prysm-pass password \
@@ -718,6 +826,15 @@ log "  Chain ID:          $CHAIN_ID"
 log "  CL Genesis Time:   $CL_GENESIS_TIME ($(date -d @$CL_GENESIS_TIME '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r $CL_GENESIS_TIME '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo 'N/A'))"
 log "  TTD:               $TTD"
 log "  Total Validators:  $TOTAL_VALIDATORS"
+log "  Genesis Validators: $GENESIS_VALIDATOR_COUNT"
+if [ "$GENESIS_VALIDATOR_COUNT" -lt "$TOTAL_VALIDATORS" ]; then
+    log "  Post-Genesis Deps: $((TOTAL_VALIDATORS - GENESIS_VALIDATOR_COUNT))"
+fi
+if [ "$DEPOSIT_CONTRACT_GATED" = "true" ] || [ "$DEPOSIT_CONTRACT_GATED" = "True" ]; then
+    log "  Deposit Contract:  GATED ($DEPOSIT_CONTRACT + gater $GATER_ADDRESS)"
+else
+    log "  Deposit Contract:  Standard ($DEPOSIT_CONTRACT)"
+fi
 log "  EL Genesis Hash:   $EL_GENESIS_HASH"
 log ""
 log "  Files in $GENERATED_DIR/"

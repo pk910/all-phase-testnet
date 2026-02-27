@@ -62,7 +62,7 @@ read_config() {
     local file="${2:-$CONFIG_DIR/genesis-config.yaml}"
     local local_file="${file%.yaml}.local.yaml"
     python3 -c "
-import yaml, sys
+import yaml, sys, json
 with open('$file') as f:
     d = yaml.safe_load(f) or {}
 try:
@@ -78,7 +78,12 @@ for k in keys:
         break
     v = v.get(k)
 if v is not None:
-    print(v)
+    if isinstance(v, (dict, list)):
+        print(json.dumps(v))
+    elif isinstance(v, bool):
+        print(str(v).lower())
+    else:
+        print(v)
 "
 }
 

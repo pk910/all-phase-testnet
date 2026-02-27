@@ -31,7 +31,17 @@ genesis_difficulty: "0x80000"
 
 # Validators (per node)
 validators_per_node: 128
+# genesis_validators_count: 320    # if set, only this many validators in genesis state
+                                   # remaining deposited post-genesis via deposit transactions
 validator_mnemonic: "test test test test test test test test test test test junk"
+
+# Gated deposit contract (optional)
+# deposit_contract_gated: true           # deploy gated deposit contract instead of standard
+# deposit_contract_admins: []            # additional admin addresses (1st prefunded account is always admin)
+# deposit_contract_settings:             # withdrawal credential prefix gating settings
+#   "0x00": 0                            # 0x00 prefix: requires token (value 0)
+#   "0x01": 0                            # 0x01 prefix: requires token
+#   "0xffff": 2                          # topups: no token required (value 2)
 
 # Pre-funded accounts
 prefund_mnemonic: "test test test test test test test test test test test junk"
