@@ -126,7 +126,7 @@ GENESIS_GASLIMIT_HEX="0x$(printf "%x" "$GENESIS_GASLIMIT")"
 GENESIS_TIMESTAMP_HEX="0x$(printf "%x" "$GENESIS_TIMESTAMP")"
 
 # Extract deposit contract from ethereum-genesis-generator docker image
-GENESIS_GEN_IMAGE="ethpandaops/ethereum-genesis-generator:5.3.0"
+GENESIS_GEN_IMAGE=$(read_config_default "genesis_generator_image" "ethpandaops/ethereum-genesis-generator:rebuild-gated-deposit-contract")
 TMPDIR_CONTRACTS=$(mktemp -d)
 trap "rm -rf $TMPDIR_CONTRACTS" EXIT
 
@@ -212,7 +212,7 @@ log "  Deriving pre-funded accounts from mnemonic..."
 > "$GENERATED_DIR/prefunded_accounts.txt"
 for idx in $(seq 0 $((PREFUND_COUNT - 1))); do
     OUTPUT=$(docker run --rm --entrypoint "" \
-        "ethpandaops/ethereum-genesis-generator:5.3.0" \
+        "$GENESIS_GEN_IMAGE" \
         geth-hdwallet -mnemonic "$PREFUND_MNEMONIC" -path "m/44'/60'/0'/0/$idx")
     ADDR=$(echo "$OUTPUT" | grep "public address:" | awk '{print $3}')
     KEY=$(echo "$OUTPUT" | grep "private key:" | awk '{print $3}')
@@ -747,7 +747,7 @@ docker run --rm \
     -u "$DOCKER_UID" \
     -v "$GENERATED_DIR/cl:/cl" \
     -v "$GENERATED_DIR/el:/el" \
-    "ethpandaops/ethereum-genesis-generator:5.3.0" \
+    "$GENESIS_GEN_IMAGE" \
     eth-genesis-state-generator beaconchain \
     --config /cl/config.yaml \
     --mnemonics /cl/mnemonics.yaml \
@@ -778,7 +778,7 @@ for i in $(seq 1 $NODE_COUNT); do
         --entrypoint "" \
         -u "$DOCKER_UID" \
         -v "$GENERATED_DIR/keys:/keys" \
-        "ethpandaops/ethereum-genesis-generator:5.3.0" \
+        "$GENESIS_GEN_IMAGE" \
         sh -c "eth2-val-tools keystores \
             --insecure \
             --prysm-pass password \

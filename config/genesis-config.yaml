@@ -5,6 +5,9 @@ chain_id: 1337
 deposit_contract_address: "0x00000000219ab540356cBB839Cbe05303d7705Fa"
 network_name: "allphase-testnet"
 
+# Genesis generator Docker image
+genesis_generator_image: "ethpandaops/ethereum-genesis-generator:rebuild-gated-deposit-contract"
+
 # Timing
 # genesis_timestamp: 0              # optional: fixed unix timestamp; if omitted, uses current time
 genesis_delay: 120                   # seconds after genesis generation before chain starts

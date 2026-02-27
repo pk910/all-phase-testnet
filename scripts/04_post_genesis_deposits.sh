@@ -87,7 +87,7 @@ log "Generating deposit data for validators ${GENESIS_VALIDATORS_COUNT}-$((TOTAL
 DEPOSIT_DATA_FILE="$GENERATED_DIR/deposit-data.json"
 
 docker run --rm --entrypoint "" \
-    "ethpandaops/ethereum-genesis-generator:5.3.0" \
+    "$(read_config_default genesis_generator_image ethpandaops/ethereum-genesis-generator:rebuild-gated-deposit-contract)" \
     eth2-val-tools deposit-data \
         --source-min="$GENESIS_VALIDATORS_COUNT" \
         --source-max="$TOTAL_VALIDATORS" \
@@ -114,35 +114,21 @@ FOUNDRY_IMAGE="ghcr.io/foundry-rs/foundry:latest"
 # Max deposits per batch (per block). Keep <=10 to avoid mempool issues.
 BATCH_SIZE=10
 
-# All EL RPC endpoints (Docker internal IPs)
-EL_ENDPOINTS=("http://${NODE1_EL_IP}:8545" "http://${NODE2_EL_IP}:8545" "http://${NODE3_EL_IP}:8545" "http://${NODE4_EL_IP}:8545" "http://${NODE5_EL_IP}:8545")
+# All EL RPC endpoints (Docker internal IPs) - space-separated for shell embedding
+EL_ENDPOINTS_STR="http://${NODE1_EL_IP}:8545 http://${NODE2_EL_IP}:8545 http://${NODE3_EL_IP}:8545 http://${NODE4_EL_IP}:8545 http://${NODE5_EL_IP}:8545"
 
 #############################################################################
-# find_working_rpc: find the first working EL RPC endpoint
-#############################################################################
-find_working_rpc() {
-    for rpc in "${EL_ENDPOINTS[@]}"; do
-        if docker run --rm --network "$DOCKER_NETWORK" -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
-            "$FOUNDRY_IMAGE" "cast chain-id --rpc-url $rpc" >/dev/null 2>&1; then
-            echo "$rpc"
-            return 0
-        fi
-    done
-    echo "$EL_RPC"  # fallback to node1
-}
-
-#############################################################################
-# get_nonce: get the current transaction count (pending nonce) for an address
+# get_nonce: get the pending nonce for an address (tries all EL endpoints)
 #############################################################################
 get_nonce() {
     local addr="$1"
-    local rpc
-    rpc=$(find_working_rpc)
     docker run --rm \
         --network "$DOCKER_NETWORK" \
         -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
         "$FOUNDRY_IMAGE" \
-        "cast nonce --block pending --rpc-url $rpc $addr" 2>/dev/null | tr -d '[:space:]'
+        "for rpc in $EL_ENDPOINTS_STR; do
+            result=\$(cast nonce --block pending --rpc-url \$rpc $addr 2>/dev/null) && echo \$result && exit 0
+        done; exit 1" 2>/dev/null | tr -d '[:space:]'
 }
 
 #############################################################################
@@ -164,52 +150,7 @@ wait_for_epoch() {
 }
 
 #############################################################################
-# sign_deposit: create a signed raw deposit transaction (cast mktx)
-#############################################################################
-sign_deposit() {
-    local pubkey="$1"
-    local withdrawal_credentials="$2"
-    local signature="$3"
-    local deposit_data_root="$4"
-    local nonce="$5"
-    local rpc="$6"
-
-    docker run --rm \
-        --network "$DOCKER_NETWORK" \
-        -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
-        "$FOUNDRY_IMAGE" \
-        "cast mktx \
-            --private-key $DEPOSITOR_KEY \
-            --rpc-url $rpc \
-            --chain-id $CHAIN_ID \
-            --value $DEPOSIT_AMOUNT_WEI \
-            --nonce $nonce \
-            $DEPOSIT_CONTRACT \
-            'deposit(bytes,bytes,bytes,bytes32)' \
-            0x$pubkey \
-            0x$withdrawal_credentials \
-            0x$signature \
-            0x$deposit_data_root" 2>/dev/null
-}
-
-#############################################################################
-# broadcast_tx: publish a raw transaction to all EL nodes
-#############################################################################
-broadcast_tx() {
-    local raw_tx="$1"
-    local ok=false
-    for rpc in "${EL_ENDPOINTS[@]}"; do
-        docker run --rm \
-            --network "$DOCKER_NETWORK" \
-            -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
-            "$FOUNDRY_IMAGE" \
-            "cast publish --rpc-url $rpc $raw_tx" >/dev/null 2>&1 &
-    done
-    wait
-}
-
-#############################################################################
-# send_deposit: sign and broadcast a deposit to all EL nodes
+# send_deposit: sign deposit and broadcast to all EL nodes (1 container)
 #############################################################################
 send_deposit() {
     local pubkey="$1"
@@ -218,23 +159,31 @@ send_deposit() {
     local deposit_data_root="$4"
     local nonce="$5"
 
-    # Sign the transaction using a working RPC (for gas estimation)
-    local raw_tx=""
-    for rpc in "${EL_ENDPOINTS[@]}"; do
-        raw_tx=$(sign_deposit "$pubkey" "$withdrawal_credentials" "$signature" "$deposit_data_root" "$nonce" "$rpc" 2>/dev/null)
-        if [ -n "$raw_tx" ] && [ ${#raw_tx} -gt 10 ]; then
-            break
-        fi
-        raw_tx=""
-    done
-
-    if [ -z "$raw_tx" ]; then
-        return 1
-    fi
-
-    # Broadcast to all EL nodes
-    broadcast_tx "$raw_tx"
-    return 0
+    # Single Docker container: sign with first working RPC, broadcast to all
+    docker run --rm \
+        --network "$DOCKER_NETWORK" \
+        -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
+        "$FOUNDRY_IMAGE" \
+        "RAW=''; \
+        for rpc in $EL_ENDPOINTS_STR; do \
+            RAW=\$(cast mktx \
+                --private-key $DEPOSITOR_KEY \
+                --rpc-url \$rpc \
+                --chain-id $CHAIN_ID \
+                --value $DEPOSIT_AMOUNT_WEI \
+                --nonce $nonce \
+                $DEPOSIT_CONTRACT \
+                'deposit(bytes,bytes,bytes,bytes32)' \
+                0x$pubkey \
+                0x$withdrawal_credentials \
+                0x$signature \
+                0x$deposit_data_root 2>/dev/null) && break; \
+        done; \
+        [ -z \"\$RAW\" ] && exit 1; \
+        for rpc in $EL_ENDPOINTS_STR; do \
+            cast publish --rpc-url \$rpc \$RAW 2>/dev/null & \
+        done; \
+        wait"
 }
 
 #############################################################################
@@ -242,25 +191,38 @@ send_deposit() {
 #############################################################################
 mint_tokens() {
     local amount=$1
-    local rpc
-    rpc=$(find_working_rpc)
 
     log "  Minting $amount deposit tokens to $DEPOSITOR_ADDR..."
+    # Sign once, broadcast to all, wait for receipt on one
     if docker run --rm \
         --network "$DOCKER_NETWORK" \
         -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
         "$FOUNDRY_IMAGE" \
-        "cast send \
-            --private-key $ADMIN_KEY \
-            --rpc-url $rpc \
-            --chain-id $CHAIN_ID \
-            $GATER_ADDRESS \
-            'mint(address,uint256)' \
-            $DEPOSITOR_ADDR \
-            $amount" 2>&1; then
+        "RAW=''; SIGN_RPC=''; \
+        for rpc in $EL_ENDPOINTS_STR; do \
+            RAW=\$(cast mktx \
+                --private-key $ADMIN_KEY \
+                --rpc-url \$rpc \
+                --chain-id $CHAIN_ID \
+                $GATER_ADDRESS \
+                'mint(address,uint256)' \
+                $DEPOSITOR_ADDR \
+                $amount 2>/dev/null) && SIGN_RPC=\$rpc && break; \
+        done; \
+        [ -z \"\$RAW\" ] && exit 1; \
+        TXHASH=''; \
+        for rpc in $EL_ENDPOINTS_STR; do \
+            if [ -z \"\$TXHASH\" ]; then \
+                TXHASH=\$(cast publish --rpc-url \$rpc \$RAW 2>/dev/null); \
+            else \
+                cast publish --rpc-url \$rpc \$RAW >/dev/null 2>&1 & \
+            fi; \
+        done; \
+        [ -z \"\$TXHASH\" ] && exit 1; \
+        cast receipt --confirmations 1 --rpc-url \$SIGN_RPC \$TXHASH >/dev/null 2>&1" 2>&1; then
         log "  Minted $amount tokens."
     else
-        log "  WARNING: mint failed (may revert pre-Capella). Continuing anyway..."
+        log "  WARNING: mint failed. Continuing anyway..."
         return 1
     fi
 }
