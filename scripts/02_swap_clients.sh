@@ -1037,23 +1037,22 @@ print(lo)
 ")
     log "  Merge block: $merge_block (first PoS block with difficulty=0)"
 
-    # ── Step 3: Generate unified reth genesis with mergeNetsplitBlock ─────
-    # mergeNetsplitBlock is needed so reth knows the PoW/PoS boundary.
-    # IMPORTANT: The SAME genesis must be used for both import and run.
-    # Using different genesis configs causes reth to wipe the imported data.
-    # Trade-off: mergeNetsplitBlock adds an extra fork to EIP-2124 fork ID,
-    # so reth can't peer with geth/besu via devp2p. This is acceptable
-    # because reth receives all chain data via Engine API from the CL.
-    log "  Generating unified genesis with mergeNetsplitBlock=$merge_block..."
-    local reth_genesis="$GENERATED_DIR/el/genesis_reth.json"
+    # ── Step 3: Generate reth import genesis with mergeNetsplitBlock ──────
+    # mergeNetsplitBlock is needed so reth knows the PoW/PoS boundary during
+    # chain import. It must NOT be present at runtime because it adds an extra
+    # fork transition to the EIP-2124 fork ID, causing peer rejection.
+    # The genesis block hash is computed from the header only (not config
+    # fields), so the DB accepts either genesis file after import.
+    log "  Generating import genesis with mergeNetsplitBlock=$merge_block..."
+    local reth_import_genesis="$GENERATED_DIR/el/genesis_reth_import.json"
     python3 -c "
 import json
 with open('$GENERATED_DIR/el/genesis.json') as f:
     genesis = json.load(f)
 genesis['config']['mergeNetsplitBlock'] = $merge_block
-with open('$reth_genesis', 'w') as f:
+with open('$reth_import_genesis', 'w') as f:
     json.dump(genesis, f, indent=2)
-print('  Written genesis_reth.json (unified, with mergeNetsplitBlock)')
+print('  Written genesis_reth_import.json (with mergeNetsplitBlock)')
 "
 
     # ── Step 4: Stop geth ─────────────────────────────────────────────
@@ -1067,25 +1066,42 @@ print('  Written genesis_reth.json (unified, with mergeNetsplitBlock)')
         -v "$DATA_DIR/node4/el:/data" \
         alpine sh -c "rm -rf /data/*"
 
-    # ── Step 6: Import chain into reth ────────────────────────────────
+    # ── Step 6: Import chain into reth (using import genesis) ──────────
     log "  Importing $latest_dec blocks into reth..."
     docker run --rm \
         -v "$DATA_DIR/node4/el:/data" \
-        -v "$reth_genesis:/genesis.json" \
+        -v "$reth_import_genesis:/genesis.json" \
         -v "$export_rlp:/chain_export.rlp" \
         "$EL_IMAGE_RETH" \
         import --chain=/genesis.json --datadir=/data /chain_export.rlp 2>&1 \
         | tail -5
     log "  Chain import complete."
 
-    # ── Step 7: Start reth with imported chain ────────────────────────
-    # No bootnodes needed: reth can't peer due to fork ID mismatch from
-    # mergeNetsplitBlock, but receives all data via Engine API from Teku CL.
+    # ── Step 7: Start reth with standard genesis (no mergeNetsplitBlock) ─
+    # Use the same genesis.json as geth/besu so fork IDs match and reth
+    # can peer with other EL nodes via devp2p.
     log "  Starting reth (${EL_IMAGE_RETH})..."
+
+    # Collect EL bootnodes for reth
+    local reth_enode_list=""
+    for node_num in 1 2 3 5; do
+        local ip_var="NODE${node_num}_EL_IP"
+        local enode
+        enode=$(curl -s -X POST "http://${!ip_var}:8545" \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"admin_nodeInfo","params":[],"id":1}' 2>/dev/null \
+            | jq -r '.result.enode // empty' 2>/dev/null || true)
+        if [ -n "$enode" ]; then
+            # Replace the IP in the enode URL with the Docker network IP
+            enode=$(echo "$enode" | sed "s/@[^:]*:/@${!ip_var}:/")
+            reth_enode_list="${reth_enode_list:+${reth_enode_list},}${enode}"
+        fi
+    done
+
     docker run -d --name "${CONTAINER_PREFIX}-node4-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE4_EL_IP" \
         -v "$DATA_DIR/node4/el:/data" \
-        -v "$reth_genesis:/genesis.json" \
+        -v "$GENERATED_DIR/el/genesis.json:/genesis.json:ro" \
         -v "$JWT_SECRET:/jwt.hex" \
         -p 8548:8545 -p 8554:8551 -p 30306:30303 -p 30306:30303/udp \
         "$EL_IMAGE_RETH" \
@@ -1104,6 +1120,7 @@ print('  Written genesis_reth.json (unified, with mergeNetsplitBlock)')
         --port=30303 \
         --discovery.port=30303 \
         --full \
+        ${reth_enode_list:+--bootnodes="$reth_enode_list"} \
         -vvv
 
     wait_for_el "$NODE4_EL_IP" "node4"

@@ -236,7 +236,7 @@ all-phase-testnet/
 
 - **Besu swap (24.10.0 → latest):** Requires `--target-gas-limit=30000000` and `--bonsai-parallel-tx-processing-enabled=false`. The parallel TX processing bug can cause world state root mismatches on competing blocks (issue [#7844](https://github.com/hyperledger/besu/issues/7844)).
 
-- **Reth swap (Geth → Reth):** The `mergeNetsplitBlock` field must only be present during chain data import, not when running Reth normally. If left in the chain spec during normal operation, Reth computes a different fork ID and fails to peer with other EL nodes.
+- **Reth swap (Geth → Reth):** The `mergeNetsplitBlock` field is needed during chain import (so Reth knows the PoW/PoS boundary) but must NOT be present at runtime. It adds an extra fork transition to the EIP-2124 fork ID, causing peer rejection. The genesis block hash is computed from header fields only (not config), so the DB accepts the standard `genesis.json` after importing with `genesis_reth_import.json`.
 
 - **Lighthouse v5.3.0 → latest requires 2-step upgrade**: v5.3.0 uses DB schema v21 which cannot be read by v8.x directly (`InvalidVersionByte` error). v6.0.0 bridges the migration (schema v21→v22). The swap daemon handles this automatically via the `node1-cl-mid` step.
 
