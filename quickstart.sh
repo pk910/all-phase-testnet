@@ -94,14 +94,26 @@ merge_boost() {
 merge_boost &
 MERGE_BOOST_PID=$!
 
-#--- Swap daemon (foreground in this session) ---
+#--- Swap daemon (background) ---
 log "Starting swap daemon..."
 bash "$PROJECT_DIR/scripts/02_swap_clients.sh" daemon &
 SWAP_PID=$!
 
-# Wait for both
+#--- Post-genesis deposits (background, if configured) ---
+DEPOSIT_PID=""
+GENESIS_VALIDATORS_COUNT=$(read_config_default "genesis_validators_count" "")
+if [ -n "$GENESIS_VALIDATORS_COUNT" ] && [ "$GENESIS_VALIDATORS_COUNT" != "null" ]; then
+    log "Starting post-genesis deposit daemon..."
+    bash "$PROJECT_DIR/scripts/04_post_genesis_deposits.sh" &
+    DEPOSIT_PID=$!
+fi
+
+# Wait for all
 wait "$MERGE_BOOST_PID" 2>/dev/null || true
 wait "$SWAP_PID" 2>/dev/null || true
+if [ -n "$DEPOSIT_PID" ]; then
+    wait "$DEPOSIT_PID" 2>/dev/null || true
+fi
 
 log "All background tasks finished."
 echo "Press enter to close."
