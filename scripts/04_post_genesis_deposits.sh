@@ -111,12 +111,28 @@ fi
 GATER_ADDRESS="0x00000000a11acc355c0de0000a11acc355c0de00"
 FOUNDRY_IMAGE="ghcr.io/foundry-rs/foundry:latest"
 
+# Max deposits per batch (per block). Keep <=10 to avoid mempool issues.
+BATCH_SIZE=10
+
 # Helper: run cast inside Docker on the same network as the testnet nodes
 run_cast() {
     docker run --rm \
         --network "$DOCKER_NETWORK" \
+        -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
         "$FOUNDRY_IMAGE" \
         "cast $*"
+}
+
+#############################################################################
+# get_nonce: get the current transaction count (nonce) for an address
+#############################################################################
+get_nonce() {
+    local addr="$1"
+    docker run --rm \
+        --network "$DOCKER_NETWORK" \
+        -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
+        "$FOUNDRY_IMAGE" \
+        "cast nonce --rpc-url $EL_RPC $addr" 2>/dev/null | tr -d '[:space:]'
 }
 
 #############################################################################
@@ -138,13 +154,19 @@ wait_for_epoch() {
 }
 
 #############################################################################
-# send_deposit: send a single deposit transaction using cast
+# send_deposit: send a single deposit transaction using cast (with nonce)
 #############################################################################
 send_deposit() {
     local pubkey="$1"
     local withdrawal_credentials="$2"
     local signature="$3"
     local deposit_data_root="$4"
+    local nonce="$5"
+
+    local nonce_flag=""
+    if [ -n "$nonce" ]; then
+        nonce_flag="--nonce $nonce"
+    fi
 
     docker run --rm \
         --network "$DOCKER_NETWORK" \
@@ -155,6 +177,7 @@ send_deposit() {
             --rpc-url $EL_RPC \
             --chain-id $CHAIN_ID \
             --value $DEPOSIT_AMOUNT_WEI \
+            $nonce_flag \
             $DEPOSIT_CONTRACT \
             'deposit(bytes,bytes,bytes,bytes32)' \
             0x$pubkey \
@@ -227,20 +250,60 @@ for dep in data[$deposit_offset:$deposit_offset + $count]:
     print(dep['pubkey'], dep['withdrawal_credentials'], dep['signature'], dep['deposit_data_root'])
 " > "$dep_list"
 
+    # Send deposits in parallel batches (up to BATCH_SIZE per batch)
     sent=0
     failed=0
-    while read -r pubkey wc sig root; do
-        if send_deposit "$pubkey" "$wc" "$sig" "$root" > /dev/null 2>&1; then
-            : # success
-        else
-            sleep 2
-            if ! send_deposit "$pubkey" "$wc" "$sig" "$root" > /dev/null 2>&1; then
-                failed=$((failed + 1))
+    batch_lines=()
+    base_nonce=$(get_nonce "$DEPOSITOR_ADDR")
+    if [ -z "$base_nonce" ]; then
+        log "  WARNING: could not get nonce, falling back to auto-nonce"
+        base_nonce=""
+    else
+        log "  Starting nonce: $base_nonce"
+    fi
+
+    while IFS= read -r line; do
+        batch_lines+=("$line")
+
+        if [ "${#batch_lines[@]}" -ge "$BATCH_SIZE" ] || [ "$((sent + ${#batch_lines[@]}))" -ge "$count" ]; then
+            # Launch batch in parallel
+            result_dir=$(mktemp -d)
+            for bi in $(seq 0 $((${#batch_lines[@]} - 1))); do
+                read -r pubkey wc sig root <<< "${batch_lines[$bi]}"
+                nonce_arg=""
+                if [ -n "$base_nonce" ]; then
+                    nonce_arg="$((base_nonce + sent + bi))"
+                fi
+                (
+                    if send_deposit "$pubkey" "$wc" "$sig" "$root" "$nonce_arg" > /dev/null 2>&1; then
+                        touch "$result_dir/ok_$bi"
+                    else
+                        sleep 2
+                        if send_deposit "$pubkey" "$wc" "$sig" "$root" "$nonce_arg" > /dev/null 2>&1; then
+                            touch "$result_dir/ok_$bi"
+                        else
+                            touch "$result_dir/fail_$bi"
+                        fi
+                    fi
+                ) &
+            done
+            wait
+
+            # Count results
+            batch_ok=$(ls "$result_dir"/ok_* 2>/dev/null | wc -l)
+            batch_fail=$(ls "$result_dir"/fail_* 2>/dev/null | wc -l)
+            rm -rf "$result_dir"
+
+            sent=$((sent + ${#batch_lines[@]}))
+            failed=$((failed + batch_fail))
+
+            # Update nonce for next batch (re-fetch to handle failures)
+            if [ -n "$base_nonce" ]; then
+                base_nonce=$(get_nonce "$DEPOSITOR_ADDR")
             fi
-        fi
-        sent=$((sent + 1))
-        if [ $((sent % 10)) -eq 0 ] || [ "$sent" -eq "$count" ]; then
+
             log "  Sent $sent/$count deposits ($failed failed)"
+            batch_lines=()
         fi
     done < "$dep_list"
     rm -f "$dep_list"
