@@ -23,10 +23,11 @@ Components:
   node5       Geth v1.11.6 (sync) + Grandine (EL: geth->nethermind, CL: no swap)
   dora        Dora block explorer
   spamoor     Spamoor transaction spammer
-  blockscout  Blockscout explorer (postgres + verifier + backend + frontend)
+  blockscout    Blockscout explorer (postgres + verifier + backend + frontend)
+  checkpointz   Checkpoint sync provider (backed by all beacon nodes)
 
 If no components are specified, all are started/stopped.
-Start order when starting all: node1 -> node3 -> node2 -> dora -> spamoor -> blockscout
+Start order when starting all: node1 -> node3 -> node2 -> dora -> spamoor -> blockscout -> checkpointz
 
 Examples:
   $0                        # start everything
@@ -49,7 +50,7 @@ for arg in "$@"; do
     case "$arg" in
         start|stop) ACTION="$arg" ;;
         -h|--help) usage; exit 0 ;;
-        node1|node2|node3|node4|node5|dora|spamoor|blockscout) COMPONENTS+=("$arg") ;;
+        node1|node2|node3|node4|node5|dora|spamoor|blockscout|checkpointz) COMPONENTS+=("$arg") ;;
         *) log_error "Unknown argument: $arg"; usage; exit 1 ;;
     esac
 done
@@ -63,7 +64,7 @@ fi
 # Ordered component list (respect start dependencies)
 #############################################################################
 # When starting, we need node1 before node3, and both before node2
-ORDER="node1 node3 node4 node5 node2 dora spamoor blockscout"
+ORDER="node1 node3 node4 node5 node2 dora spamoor blockscout checkpointz"
 
 ordered_components() {
     local result=()
@@ -108,6 +109,7 @@ load_config() {
     BLOCKSCOUT_IMAGE=$(read_config "blockscout_image")
     BLOCKSCOUT_FRONTEND_IMAGE=$(read_config "blockscout_frontend_image")
     BLOCKSCOUT_VERIF_IMAGE=$(read_config "blockscout_verif_image")
+    CHECKPOINTZ_IMAGE=$(read_config_default "checkpointz_image" "ethpandaops/checkpointz:latest")
 
     # Public IP for external-facing services (auto-detect or override via config)
     PUBLIC_IP=$(read_config_default "public_ip" "")
@@ -132,6 +134,7 @@ pull_images() {
             dora) images+=("$DORA_IMAGE") ;;
             spamoor) images+=("$SPAMOOR_IMAGE") ;;
             blockscout) images+=("$BLOCKSCOUT_IMAGE" "$BLOCKSCOUT_FRONTEND_IMAGE" "$BLOCKSCOUT_VERIF_IMAGE" "postgres:17-alpine") ;;
+            checkpointz) images+=("$CHECKPOINTZ_IMAGE") ;;
         esac
     done
 
@@ -956,6 +959,22 @@ start_blockscout() {
     log "  Blockscout frontend: ${CONTAINER_PREFIX}-blockscout-frontend [http://${PUBLIC_IP}:3000]"
 }
 
+start_checkpointz() {
+    log "Starting Checkpointz..."
+
+    stop_component checkpointz
+    mkdir -p "$DATA_DIR/checkpointz"
+
+    docker run -d --name "${CONTAINER_PREFIX}-checkpointz" \
+        --network "$DOCKER_NETWORK" --ip "$CHECKPOINTZ_IP" \
+        -v "$CONFIG_DIR/checkpointz-config.yaml:/config/checkpointz.yaml" \
+        -p 8092:5555 \
+        "$CHECKPOINTZ_IMAGE" \
+        --config /config/checkpointz.yaml
+
+    log "  Checkpointz: ${CONTAINER_PREFIX}-checkpointz [http://localhost:8092]"
+}
+
 #############################################################################
 # Main
 #############################################################################
@@ -985,19 +1004,20 @@ fi
 
 load_config
 
-# Filter out blockscout if disabled
+# Filter out disabled optional components
+local_filtered=()
 BLOCKSCOUT_ENABLED=$(read_config_default "blockscout_enabled" "true")
-if [ "$BLOCKSCOUT_ENABLED" != "true" ] && [ "$BLOCKSCOUT_ENABLED" != "True" ]; then
-    local_filtered=()
-    for c in "${COMPONENTS[@]}"; do
-        if [ "$c" = "blockscout" ]; then
-            log "Blockscout disabled via config (blockscout_enabled: false) -- skipping"
-        else
-            local_filtered+=("$c")
-        fi
-    done
-    COMPONENTS=("${local_filtered[@]}")
-fi
+CHECKPOINTZ_ENABLED=$(read_config_default "checkpointz_enabled" "true")
+for c in "${COMPONENTS[@]}"; do
+    if [ "$c" = "blockscout" ] && [ "$BLOCKSCOUT_ENABLED" != "true" ] && [ "$BLOCKSCOUT_ENABLED" != "True" ]; then
+        log "Blockscout disabled via config -- skipping"
+    elif [ "$c" = "checkpointz" ] && [ "$CHECKPOINTZ_ENABLED" != "true" ] && [ "$CHECKPOINTZ_ENABLED" != "True" ]; then
+        log "Checkpointz disabled via config -- skipping"
+    else
+        local_filtered+=("$c")
+    fi
+done
+COMPONENTS=("${local_filtered[@]}")
 
 ORDERED=($(ordered_components))
 log "=== Starting components: ${ORDERED[*]} ==="
@@ -1024,6 +1044,7 @@ for component in "${ORDERED[@]}"; do
         dora) log "  Dora explorer:                          [http://localhost:8090]" ;;
         spamoor) log "  Spamoor:                                [http://localhost:8091]" ;;
         blockscout) log "  Blockscout:                             [http://localhost:3000] (API: http://localhost:4000)" ;;
+        checkpointz) log "  Checkpointz:                            [http://localhost:8092]" ;;
     esac
 done
 log ""

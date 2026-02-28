@@ -39,7 +39,16 @@ genesis_difficulty: "0x80000"
 validators_per_node: 128
 # genesis_validators_count: 320    # if set, only this many validators in genesis state
                                    # remaining deposited post-genesis via deposit transactions
+                                   # keys are split per-node: each node gets genesis_count/NODE_COUNT
+                                   # genesis validators + the rest as post-genesis deposits
 validator_mnemonic: "test test test test test test test test test test test junk"
+
+# Per-node validator mnemonics (optional)
+# If set, each node uses its own mnemonic for key derivation instead of the global validator_mnemonic.
+# Nodes without an entry fall back to the global validator_mnemonic.
+# validator_mnemonics:
+#   node1: "mnemonic for node 1..."
+#   node2: "mnemonic for node 2..."
 
 # Gated deposit contract (optional)
 # deposit_contract_gated: true           # deploy gated deposit contract instead of standard
@@ -79,6 +88,10 @@ cl_image_grandine: "sifrai/grandine:latest"
 
 # Explorer
 dora_image: "ethpandaops/dora:latest"
+
+# Checkpoint sync provider
+checkpointz_enabled: true
+checkpointz_image: "ethpandaops/checkpointz:latest"
 
 # Spammer
 spamoor_image: "ethpandaops/spamoor:latest"

@@ -17,7 +17,7 @@ CONTAINER_PREFIX="allphase"
 NODE_COUNT=5
 
 # All valid component names (start order matters: node2 depends on node1+node3)
-ALL_COMPONENTS="node1 node3 node4 node5 node2 dora spamoor blockscout"
+ALL_COMPONENTS="node1 node3 node4 node5 node2 dora spamoor blockscout checkpointz"
 
 # Static IPs for all containers
 NODE1_EL_IP="172.30.0.10"
@@ -34,6 +34,7 @@ BLOCKSCOUT_DB_IP="172.30.0.60"
 BLOCKSCOUT_BACKEND_IP="172.30.0.61"
 BLOCKSCOUT_VERIF_IP="172.30.0.62"
 BLOCKSCOUT_FRONTEND_IP="172.30.0.63"
+CHECKPOINTZ_IP="172.30.0.70"
 
 # Read pre-funded account address by index (0-based)
 prefund_address() {
@@ -119,6 +120,7 @@ containers_for_component() {
         dora) echo "${CONTAINER_PREFIX}-dora" ;;
         spamoor) echo "${CONTAINER_PREFIX}-spamoor" ;;
         blockscout) echo "${CONTAINER_PREFIX}-blockscout-db ${CONTAINER_PREFIX}-blockscout-verif ${CONTAINER_PREFIX}-blockscout ${CONTAINER_PREFIX}-blockscout-frontend" ;;
+        checkpointz) echo "${CONTAINER_PREFIX}-checkpointz" ;;
         *) echo "" ;;
     esac
 }

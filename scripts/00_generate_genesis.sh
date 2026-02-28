@@ -17,6 +17,7 @@ GENESIS_GASLIMIT=$(read_config_default "genesis_gaslimit" "30000000")
 VALIDATORS_PER_NODE=$(read_config "validators_per_node")
 GENESIS_VALIDATORS_COUNT=$(read_config_default "genesis_validators_count" "")
 VALIDATOR_MNEMONIC=$(read_config "validator_mnemonic")
+VALIDATOR_MNEMONICS=$(read_config_default "validator_mnemonics" "")
 
 # Gated deposit contract
 DEPOSIT_CONTRACT_GATED=$(read_config_default "deposit_contract_gated" "false")
@@ -616,11 +617,30 @@ TOTAL_VALIDATORS=$((VALIDATORS_PER_NODE * NODE_COUNT))
 # If genesis_validators_count is set, only include that many in genesis
 if [ -n "$GENESIS_VALIDATORS_COUNT" ] && [ "$GENESIS_VALIDATORS_COUNT" != "null" ]; then
     GENESIS_VALIDATOR_COUNT=$GENESIS_VALIDATORS_COUNT
+    GENESIS_PER_NODE=$((GENESIS_VALIDATOR_COUNT / NODE_COUNT))
+    DEPOSIT_PER_NODE=$((VALIDATORS_PER_NODE - GENESIS_PER_NODE))
     log "  Genesis validators: $GENESIS_VALIDATOR_COUNT (of $TOTAL_VALIDATORS total)"
+    log "  Per node: $GENESIS_PER_NODE genesis + $DEPOSIT_PER_NODE deposit = $VALIDATORS_PER_NODE"
     log "  Remaining $((TOTAL_VALIDATORS - GENESIS_VALIDATOR_COUNT)) validators will be deposited post-genesis"
 else
     GENESIS_VALIDATOR_COUNT=$TOTAL_VALIDATORS
+    GENESIS_PER_NODE=$VALIDATORS_PER_NODE
+    DEPOSIT_PER_NODE=0
 fi
+
+# Resolve per-node mnemonics (fall back to global)
+get_node_mnemonic() {
+    local node_num=$1
+    if [ -n "$VALIDATOR_MNEMONICS" ] && [ "$VALIDATOR_MNEMONICS" != "null" ]; then
+        local node_mnemonic
+        node_mnemonic=$(read_config_default "validator_mnemonics.node${node_num}" "")
+        if [ -n "$node_mnemonic" ]; then
+            echo "$node_mnemonic"
+            return
+        fi
+    fi
+    echo "$VALIDATOR_MNEMONIC"
+}
 
 cat > "$GENERATED_DIR/cl/config.yaml" << EOF
 PRESET_BASE: 'mainnet'
@@ -737,10 +757,27 @@ log "  -> deposit_contract_block.txt, deploy_block.txt"
 log "Generating CL genesis state (genesis.ssz)..."
 
 # Create mnemonics.yaml (only genesis validators go into genesis.ssz)
-cat > "$GENERATED_DIR/cl/mnemonics.yaml" << EOF
-- mnemonic: "$VALIDATOR_MNEMONIC"
-  count: $GENESIS_VALIDATOR_COUNT
+# Each node contributes genesis_per_node validators from its mnemonic
+> "$GENERATED_DIR/cl/mnemonics.yaml"
+for i in $(seq 1 $NODE_COUNT); do
+    NODE_MNEMONIC=$(get_node_mnemonic "$i")
+    if [ -n "$VALIDATOR_MNEMONICS" ] && [ "$VALIDATOR_MNEMONICS" != "null" ]; then
+        # Per-node mnemonics: each node uses source indices [0, genesis_per_node)
+        cat >> "$GENERATED_DIR/cl/mnemonics.yaml" << EOF
+- mnemonic: "$NODE_MNEMONIC"
+  count: $GENESIS_PER_NODE
 EOF
+    else
+        # Single global mnemonic: use start offset to pick correct slice
+        SOURCE_START=$(( (i - 1) * VALIDATORS_PER_NODE ))
+        cat >> "$GENERATED_DIR/cl/mnemonics.yaml" << EOF
+- mnemonic: "$NODE_MNEMONIC"
+  start: $SOURCE_START
+  count: $GENESIS_PER_NODE
+EOF
+    fi
+done
+log "  mnemonics.yaml: $NODE_COUNT entries, $GENESIS_PER_NODE validators each (total $GENESIS_VALIDATOR_COUNT)"
 
 # Use the ethereum-genesis-generator docker image which has eth-genesis-state-generator
 docker run --rm \
@@ -768,8 +805,19 @@ log "  -> $GENERATED_DIR/cl/genesis.ssz"
 log "Generating validator keystores..."
 
 for i in $(seq 1 $NODE_COUNT); do
-    OFFSET=$(( (i - 1) * VALIDATORS_PER_NODE ))
-    log "  Node $i: validators $OFFSET to $((OFFSET + VALIDATORS_PER_NODE - 1))"
+    NODE_MNEMONIC=$(get_node_mnemonic "$i")
+
+    if [ -n "$VALIDATOR_MNEMONICS" ] && [ "$VALIDATOR_MNEMONICS" != "null" ]; then
+        # Per-node mnemonics: each node uses source [0, validators_per_node)
+        SOURCE_MIN=0
+        SOURCE_MAX=$VALIDATORS_PER_NODE
+    else
+        # Single global mnemonic: each node uses source [(i-1)*vpn, i*vpn)
+        SOURCE_MIN=$(( (i - 1) * VALIDATORS_PER_NODE ))
+        SOURCE_MAX=$(( i * VALIDATORS_PER_NODE ))
+    fi
+
+    log "  Node $i: source [$SOURCE_MIN, $SOURCE_MAX) (genesis [$SOURCE_MIN, $((SOURCE_MIN + GENESIS_PER_NODE))), deposit [$((SOURCE_MIN + GENESIS_PER_NODE)), $SOURCE_MAX))"
 
     # Clean with docker since previous keys may be root-owned
     docker run --rm -v "$GENERATED_DIR/keys:/keys" alpine rm -rf "/keys/node${i}" 2>/dev/null || true
@@ -783,9 +831,9 @@ for i in $(seq 1 $NODE_COUNT); do
         sh -c "eth2-val-tools keystores \
             --insecure \
             --prysm-pass password \
-            --source-mnemonic '$VALIDATOR_MNEMONIC' \
-            --source-min $OFFSET \
-            --source-max $((OFFSET + VALIDATORS_PER_NODE)) \
+            --source-mnemonic '$NODE_MNEMONIC' \
+            --source-min $SOURCE_MIN \
+            --source-max $SOURCE_MAX \
             --out-loc /tmp/keys && cp -r /tmp/keys /keys/node${i}"
 
     # Fix permissions on secrets (some clients require restricted access)
@@ -800,21 +848,97 @@ echo -n "password" > "$GENERATED_DIR/keys/prysm-password.txt"
 log "  -> $GENERATED_DIR/keys/prysm-password.txt"
 
 #############################################################################
-# 7. Generate validator names for Dora
+# 7. Generate key distribution manifest & validator names
 #############################################################################
+log "Generating key distribution manifest..."
+
+# Save key-distribution.json (consumed by deposit script and for reference)
+HAS_PER_NODE_MNEMONICS="false"
+if [ -n "$VALIDATOR_MNEMONICS" ] && [ "$VALIDATOR_MNEMONICS" != "null" ]; then
+    HAS_PER_NODE_MNEMONICS="true"
+fi
+
+python3 << PYEOF
+import json
+
+use_per_node = ("$HAS_PER_NODE_MNEMONICS" == "true")
+
+nodes = []
+for i in range(1, $NODE_COUNT + 1):
+    if use_per_node:
+        # Per-node mnemonics: source [0, vpn)
+        source_min = 0
+        source_max = $VALIDATORS_PER_NODE
+    else:
+        # Single global mnemonic: source [(i-1)*vpn, i*vpn)
+        source_min = (i - 1) * $VALIDATORS_PER_NODE
+        source_max = i * $VALIDATORS_PER_NODE
+
+    nodes.append({
+        "node": i,
+        "mnemonic": "",  # filled in below by bash loop
+        "source_min": source_min,
+        "source_max": source_max,
+        "genesis_source_min": source_min,
+        "genesis_source_max": source_min + $GENESIS_PER_NODE,
+        "deposit_source_min": source_min + $GENESIS_PER_NODE,
+        "deposit_source_max": source_max,
+    })
+
+dist = {
+    "total_validators": $TOTAL_VALIDATORS,
+    "genesis_validators_count": $GENESIS_VALIDATOR_COUNT,
+    "validators_per_node": $VALIDATORS_PER_NODE,
+    "genesis_per_node": $GENESIS_PER_NODE,
+    "deposit_per_node": $DEPOSIT_PER_NODE,
+    "genesis_fork_version": "${FORK_VERSION_PREFIX}00",
+    "nodes": nodes,
+}
+
+with open("$GENERATED_DIR/key-distribution.json", "w") as f:
+    json.dump(dist, f, indent=2)
+
+print(f"  -> key-distribution.json ({len(nodes)} nodes)")
+PYEOF
+
+# Fill in actual mnemonics (can't embed shell function in python heredoc)
+for i in $(seq 1 $NODE_COUNT); do
+    NODE_MNEMONIC=$(get_node_mnemonic "$i")
+    python3 -c "
+import json
+with open('$GENERATED_DIR/key-distribution.json') as f:
+    d = json.load(f)
+d['nodes'][$((i-1))]['mnemonic'] = '$NODE_MNEMONIC'
+with open('$GENERATED_DIR/key-distribution.json', 'w') as f:
+    json.dump(d, f, indent=2)
+"
+done
+
 log "Generating validator names..."
 
 # Node-to-client mapping (must match 01_start_network.sh)
 NODE_CLIENTS=("geth/lighthouse" "geth/lodestar" "besu/prysm" "reth/teku" "nethermind/grandine")
 
+# Validator names: beacon indices 0..genesis_count-1 are genesis, assigned in node order
+# Deposit validators get beacon indices starting from genesis_count in deposit order
 NAMES_FILE="$GENERATED_DIR/validator-names.yaml"
 > "$NAMES_FILE"
+BEACON_IDX=0
 for i in $(seq 1 $NODE_COUNT); do
-    OFFSET=$(( (i - 1) * VALIDATORS_PER_NODE ))
-    END=$(( OFFSET + VALIDATORS_PER_NODE - 1 ))
     CLIENT="${NODE_CLIENTS[$((i - 1))]}"
-    echo "${OFFSET}-${END}: \"node${i} - ${CLIENT}\"" >> "$NAMES_FILE"
+    END=$((BEACON_IDX + GENESIS_PER_NODE - 1))
+    echo "${BEACON_IDX}-${END}: \"node${i} - ${CLIENT} (genesis)\"" >> "$NAMES_FILE"
+    BEACON_IDX=$((END + 1))
 done
+# Deposit validators: labeled per node in deposit order
+if [ "$DEPOSIT_PER_NODE" -gt 0 ]; then
+    for i in $(seq 1 $NODE_COUNT); do
+        CLIENT="${NODE_CLIENTS[$((i - 1))]}"
+        END=$((BEACON_IDX + DEPOSIT_PER_NODE - 1))
+        echo "${BEACON_IDX}-${END}: \"node${i} - ${CLIENT} (deposit)\"" >> "$NAMES_FILE"
+        BEACON_IDX=$((END + 1))
+    done
+fi
 
 log "  -> $NAMES_FILE"
 
@@ -828,9 +952,9 @@ log "  CL Genesis Time:   $CL_GENESIS_TIME ($(date -d @$CL_GENESIS_TIME '+%Y-%m-
 log "  Fork Versions:     ${FORK_VERSION_PREFIX}00..${FORK_VERSION_PREFIX}06"
 log "  TTD:               $TTD"
 log "  Total Validators:  $TOTAL_VALIDATORS"
-log "  Genesis Validators: $GENESIS_VALIDATOR_COUNT"
+log "  Genesis Validators: $GENESIS_VALIDATOR_COUNT ($GENESIS_PER_NODE per node)"
 if [ "$GENESIS_VALIDATOR_COUNT" -lt "$TOTAL_VALIDATORS" ]; then
-    log "  Post-Genesis Deps: $((TOTAL_VALIDATORS - GENESIS_VALIDATOR_COUNT))"
+    log "  Post-Genesis Deps: $((TOTAL_VALIDATORS - GENESIS_VALIDATOR_COUNT)) ($DEPOSIT_PER_NODE per node)"
 fi
 if [ "$DEPOSIT_CONTRACT_GATED" = "true" ] || [ "$DEPOSIT_CONTRACT_GATED" = "True" ]; then
     log "  Deposit Contract:  GATED ($DEPOSIT_CONTRACT + gater $GATER_ADDRESS)"
