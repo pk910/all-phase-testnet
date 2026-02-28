@@ -14,6 +14,9 @@ genesis_delay: 120                   # seconds after genesis generation before c
 seconds_per_slot: 12
 slots_per_epoch: 32
 
+# Fork version prefix (3 bytes, last byte is fork ID: 00=genesis, 01=altair, ...)
+fork_version_prefix: "0x100000"
+
 # Fork schedule (CL epochs)
 altair_fork_epoch: 1
 bellatrix_fork_epoch: 2

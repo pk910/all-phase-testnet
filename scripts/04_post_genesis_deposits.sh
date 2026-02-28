@@ -13,7 +13,8 @@ VALIDATORS_PER_NODE=$(read_config "validators_per_node")
 GENESIS_VALIDATORS_COUNT=$(read_config_default "genesis_validators_count" "")
 VALIDATOR_MNEMONIC=$(read_config "validator_mnemonic")
 DEPOSIT_CONTRACT_GATED=$(read_config_default "deposit_contract_gated" "false")
-GENESIS_FORK_VERSION="0x10000000"
+FORK_VERSION_PREFIX=$(read_config_default "fork_version_prefix" "0x100000")
+GENESIS_FORK_VERSION="${FORK_VERSION_PREFIX}00"
 DEPOSIT_AMOUNT_WEI="32000000000000000000"  # 32 ETH
 
 TOTAL_VALIDATORS=$((VALIDATORS_PER_NODE * NODE_COUNT))
@@ -42,8 +43,8 @@ DEPOSITOR_KEY=$(sed -n '2p' "$GENERATED_DIR/prefunded_accounts.txt" | cut -d',' 
 log "  Admin (1st account):     $ADMIN_ADDR"
 log "  Depositor (2nd account): $DEPOSITOR_ADDR"
 
-# EL RPC endpoint (node1, internal Docker IP)
-EL_RPC="http://${NODE1_EL_IP}:8545"
+# EL RPC endpoints (all nodes, internal Docker IPs)
+EL_ENDPOINTS_JSON="[\"http://${NODE1_EL_IP}:8545\",\"http://${NODE2_EL_IP}:8545\",\"http://${NODE3_EL_IP}:8545\",\"http://${NODE4_EL_IP}:8545\",\"http://${NODE5_EL_IP}:8545\"]"
 
 # Fork schedule for distributing deposits
 CAPELLA_FORK_EPOCH=$(read_config "capella_fork_epoch")
@@ -110,26 +111,25 @@ fi
 #############################################################################
 GATER_ADDRESS="0x00000000a11acc355c0de0000a11acc355c0de00"
 FOUNDRY_IMAGE="ghcr.io/foundry-rs/foundry:latest"
-
-# Max deposits per batch (per block). Keep <=10 to avoid mempool issues.
 BATCH_SIZE=10
 
-# All EL RPC endpoints (Docker internal IPs) - space-separated for shell embedding
-EL_ENDPOINTS_STR="http://${NODE1_EL_IP}:8545 http://${NODE2_EL_IP}:8545 http://${NODE3_EL_IP}:8545 http://${NODE4_EL_IP}:8545 http://${NODE5_EL_IP}:8545"
-
-#############################################################################
-# get_nonce: get the pending nonce for an address (tries all EL endpoints)
-#############################################################################
-get_nonce() {
-    local addr="$1"
-    docker run --rm \
-        --network "$DOCKER_NETWORK" \
-        -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
-        "$FOUNDRY_IMAGE" \
-        "for rpc in $EL_ENDPOINTS_STR; do
-            result=\$(cast nonce --block pending --rpc-url \$rpc $addr 2>/dev/null) && echo \$result && exit 0
-        done; exit 1" 2>/dev/null | tr -d '[:space:]'
-}
+# Config JSON for the Python deposit sender
+DEPOSIT_CONFIG=$(python3 -c "
+import json
+print(json.dumps({
+    'depositor_key': '$DEPOSITOR_KEY',
+    'depositor_addr': '$DEPOSITOR_ADDR',
+    'admin_key': '$ADMIN_KEY',
+    'chain_id': $CHAIN_ID,
+    'deposit_contract': '$DEPOSIT_CONTRACT',
+    'deposit_amount_wei': '$DEPOSIT_AMOUNT_WEI',
+    'gater_address': '$GATER_ADDRESS',
+    'batch_size': $BATCH_SIZE,
+    'el_endpoints': $EL_ENDPOINTS_JSON,
+    'docker_network': '$DOCKER_NETWORK',
+    'foundry_image': '$FOUNDRY_IMAGE',
+}))
+")
 
 #############################################################################
 # wait_for_epoch: wait until the chain reaches a target epoch
@@ -147,84 +147,6 @@ wait_for_epoch() {
         fi
         sleep "$SECONDS_PER_SLOT"
     done
-}
-
-#############################################################################
-# send_deposit: sign deposit and broadcast to all EL nodes (1 container)
-#############################################################################
-send_deposit() {
-    local pubkey="$1"
-    local withdrawal_credentials="$2"
-    local signature="$3"
-    local deposit_data_root="$4"
-    local nonce="$5"
-
-    # Single Docker container: sign with first working RPC, broadcast to all
-    docker run --rm \
-        --network "$DOCKER_NETWORK" \
-        -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
-        "$FOUNDRY_IMAGE" \
-        "RAW=''; \
-        for rpc in $EL_ENDPOINTS_STR; do \
-            RAW=\$(cast mktx \
-                --private-key $DEPOSITOR_KEY \
-                --rpc-url \$rpc \
-                --chain-id $CHAIN_ID \
-                --value $DEPOSIT_AMOUNT_WEI \
-                --nonce $nonce \
-                $DEPOSIT_CONTRACT \
-                'deposit(bytes,bytes,bytes,bytes32)' \
-                0x$pubkey \
-                0x$withdrawal_credentials \
-                0x$signature \
-                0x$deposit_data_root 2>/dev/null) && break; \
-        done; \
-        [ -z \"\$RAW\" ] && exit 1; \
-        for rpc in $EL_ENDPOINTS_STR; do \
-            cast publish --rpc-url \$rpc \$RAW 2>/dev/null & \
-        done; \
-        wait"
-}
-
-#############################################################################
-# mint_tokens: mint deposit tokens to the depositor (admin calls gater)
-#############################################################################
-mint_tokens() {
-    local amount=$1
-
-    log "  Minting $amount deposit tokens to $DEPOSITOR_ADDR..."
-    # Sign once, broadcast to all, wait for receipt on one
-    if docker run --rm \
-        --network "$DOCKER_NETWORK" \
-        -e FOUNDRY_DISABLE_NIGHTLY_WARNING=1 \
-        "$FOUNDRY_IMAGE" \
-        "RAW=''; SIGN_RPC=''; \
-        for rpc in $EL_ENDPOINTS_STR; do \
-            RAW=\$(cast mktx \
-                --private-key $ADMIN_KEY \
-                --rpc-url \$rpc \
-                --chain-id $CHAIN_ID \
-                $GATER_ADDRESS \
-                'mint(address,uint256)' \
-                $DEPOSITOR_ADDR \
-                $amount 2>/dev/null) && SIGN_RPC=\$rpc && break; \
-        done; \
-        [ -z \"\$RAW\" ] && exit 1; \
-        TXHASH=''; \
-        for rpc in $EL_ENDPOINTS_STR; do \
-            if [ -z \"\$TXHASH\" ]; then \
-                TXHASH=\$(cast publish --rpc-url \$rpc \$RAW 2>/dev/null); \
-            else \
-                cast publish --rpc-url \$rpc \$RAW >/dev/null 2>&1 & \
-            fi; \
-        done; \
-        [ -z \"\$TXHASH\" ] && exit 1; \
-        cast receipt --confirmations 1 --rpc-url \$SIGN_RPC \$TXHASH >/dev/null 2>&1" 2>&1; then
-        log "  Minted $amount tokens."
-    else
-        log "  WARNING: mint failed. Continuing anyway..."
-        return 1
-    fi
 }
 
 #############################################################################
@@ -249,91 +171,23 @@ for i in $(seq 0 $((NUM_FORKS - 1))); do
     wait_for_epoch "$fork_epoch"
     log "  Epoch reached. Sending deposits..."
 
-    # If gated, mint tokens first
-    mint_ok=true
+    # If gated, mint tokens first using Python helper
     if [ "$DEPOSIT_CONTRACT_GATED" = "true" ]; then
-        mint_tokens "$count" || mint_ok=false
-    fi
-
-    # Read deposit data into a temp file (one line per deposit: pubkey wc sig root)
-    dep_list=$(mktemp)
-    python3 -c "
-import json, sys
-with open('$DEPOSIT_DATA_FILE') as f:
-    data = json.load(f)
-for dep in data[$deposit_offset:$deposit_offset + $count]:
-    print(dep['pubkey'], dep['withdrawal_credentials'], dep['signature'], dep['deposit_data_root'])
-" > "$dep_list"
-
-    # Send deposits in parallel batches (up to BATCH_SIZE per batch)
-    sent=0
-    failed=0
-    batch_lines=()
-    base_nonce=$(get_nonce "$DEPOSITOR_ADDR")
-    if [ -z "$base_nonce" ]; then
-        log "  WARNING: could not get nonce, falling back to auto-nonce"
-        base_nonce=""
-    else
-        log "  Starting nonce: $base_nonce"
-    fi
-
-    while IFS= read -r line; do
-        batch_lines+=("$line")
-
-        if [ "${#batch_lines[@]}" -ge "$BATCH_SIZE" ] || [ "$((sent + ${#batch_lines[@]}))" -ge "$count" ]; then
-            # Launch batch in parallel
-            result_dir=$(mktemp -d)
-            for bi in $(seq 0 $((${#batch_lines[@]} - 1))); do
-                read -r pubkey wc sig root <<< "${batch_lines[$bi]}"
-                nonce_arg=""
-                if [ -n "$base_nonce" ]; then
-                    nonce_arg="$((base_nonce + sent + bi))"
-                fi
-                (
-                    if send_deposit "$pubkey" "$wc" "$sig" "$root" "$nonce_arg" > /dev/null 2>&1; then
-                        touch "$result_dir/ok_$bi"
-                    else
-                        sleep 2
-                        if send_deposit "$pubkey" "$wc" "$sig" "$root" "$nonce_arg" > /dev/null 2>&1; then
-                            touch "$result_dir/ok_$bi"
-                        else
-                            touch "$result_dir/fail_$bi"
-                        fi
-                    fi
-                ) &
-            done
-            wait
-
-            # Count results
-            batch_ok=$(ls "$result_dir"/ok_* 2>/dev/null | wc -l)
-            batch_fail=$(ls "$result_dir"/fail_* 2>/dev/null | wc -l)
-            rm -rf "$result_dir"
-
-            sent=$((sent + ${#batch_lines[@]}))
-            failed=$((failed + batch_fail))
-
-            # Wait briefly for txs to propagate, then re-fetch pending nonce
-            if [ -n "$base_nonce" ]; then
-                sleep 1
-                new_nonce=$(get_nonce "$DEPOSITOR_ADDR")
-                if [ -n "$new_nonce" ]; then
-                    base_nonce="$new_nonce"
-                else
-                    # Fallback: assume all nonces were consumed
-                    base_nonce=$((base_nonce + sent))
-                fi
-            fi
-
-            log "  Sent $sent/$count deposits ($failed failed)"
-            batch_lines=()
+        log "  Minting $count deposit tokens..."
+        if python3 "$PROJECT_DIR/scripts/lib/send_deposits.py" mint "$count" "$DEPOSIT_CONFIG"; then
+            log "  Minted $count tokens."
+        else
+            log "  WARNING: mint failed. Continuing anyway..."
         fi
-    done < "$dep_list"
-    rm -f "$dep_list"
-
-    if [ "$failed" -gt 0 ]; then
-        log "  WARNING: $fork_name had $failed/$count failed deposits (may be pre-Capella reverts)"
     fi
-    log "  $fork_name deposits complete ($count sent, $failed failed)."
+
+    # Send deposits using Python helper (batched, broadcast to all nodes)
+    python3 "$PROJECT_DIR/scripts/lib/send_deposits.py" "$DEPOSIT_DATA_FILE" "$deposit_offset" "$count" "$DEPOSIT_CONFIG" \
+        2>&1 | while IFS= read -r line; do
+        log "  $line"
+    done
+
+    log "  $fork_name deposits complete."
     deposit_offset=$((deposit_offset + count))
 done
 

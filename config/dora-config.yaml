@@ -15,6 +15,26 @@ frontend:
   siteName: "Dora the Explorer"
   siteSubtitle: "All-Phase Testnet"
   validatorNamesYaml: "/validator-names.yaml"
+  rainbowkitProjectId: "15fe4ab4d5c0bcb6f0dc7c398301ff0e"
+  showSensitivePeerInfos: true
+  showSubmitDeposit: true
+  showSubmitElRequests: true
+  showPeerDASInfos: true
+  disableDasGuardianCheck: false
+  enableDasGuardianMassScan: true
+  showValidatorSummary: true
+
+api:
+  enabled: true
+  corsOrigins:
+    - "*"
+  defaultRateLimit: 60
+
+rpcProxy:
+  enabled: true
+  upstreamUrl: "http://allphase-node1-el:8545"
+  requestsPerMinute: 6000
+  burstLimit: 10000
 
 beaconapi:
   endpoints:
