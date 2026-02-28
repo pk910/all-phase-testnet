@@ -55,20 +55,20 @@ CL_GENESIS_TIME=$((GENESIS_TIMESTAMP + GENESIS_DELAY))
 # TTD calculation
 TTD=$(read_config "terminal_total_difficulty")
 if [ -z "$TTD" ] || [ "$TTD" = "null" ]; then
-    # Auto-calculate: target merge at bellatrix + 32 epochs (at base mining rate).
-    # Extra miners (3x power) start at bellatrix, pulling the actual merge forward
-    # to ~bellatrix + 11 epochs. This ensures merge always happens AFTER bellatrix.
+    # Auto-calculate: target merge midway between bellatrix and capella (at base rate).
+    # Extra miners (3x power) start at bellatrix, pulling the actual merge forward.
     # Rate: ~10s avg block time (difficulty grows ~30% by merge, slowing blocks).
     # Avg difficulty: ~1.3x genesis (difficulty adjustment over mining duration).
-    TARGET_SECONDS=$((GENESIS_DELAY + (BELLATRIX_FORK_EPOCH + 32) * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
+    MERGE_TARGET_EPOCH=$(( (BELLATRIX_FORK_EPOCH + CAPELLA_FORK_EPOCH) / 2 ))
+    TARGET_SECONDS=$((GENESIS_DELAY + MERGE_TARGET_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
     ESTIMATED_BLOCKS=$((TARGET_SECONDS / 10))
     GENESIS_DIFF_DEC=$(printf "%d" "$GENESIS_DIFFICULTY")
     AVG_DIFFICULTY=$((GENESIS_DIFF_DEC * 13 / 10))
     TTD=$((ESTIMATED_BLOCKS * AVG_DIFFICULTY))
-    MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 32))
     log "Auto-calculated TTD: $TTD (target merge ~epoch $MERGE_TARGET_EPOCH at base rate)"
+    log "  Midpoint of bellatrix($BELLATRIX_FORK_EPOCH) and capella($CAPELLA_FORK_EPOCH)"
     log "  Target: ${TARGET_SECONDS}s (~$ESTIMATED_BLOCKS blocks@10s × $AVG_DIFFICULTY avg diff)"
-    log "  With 3x miners after bellatrix, actual merge ~bellatrix+11 epochs"
+    log "  With 3x miners after bellatrix, actual merge pulled earlier"
 else
     log "Using manual TTD: $TTD"
 fi
