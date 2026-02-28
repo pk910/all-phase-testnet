@@ -55,22 +55,20 @@ CL_GENESIS_TIME=$((GENESIS_TIMESTAMP + GENESIS_DELAY))
 # TTD calculation
 TTD=$(read_config "terminal_total_difficulty")
 if [ -z "$TTD" ] || [ "$TTD" = "null" ]; then
-    # Auto-calculate: target merge ~1 epoch after bellatrix
-    # Extra miners start at bellatrix; TTD must be unreachable by 2 base miners alone.
-    # Two phases:
-    #   Pre-bellatrix: 2 CPU miners (geth + besu), ~8s avg block time
-    #   Post-bellatrix: 4 CPU miners (+ 2 extra from merge boost), ~4s avg
-    BELLATRIX_SECONDS=$((GENESIS_DELAY + BELLATRIX_FORK_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
-    POST_BELLATRIX_SECONDS=$((1 * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))  # 1 epoch target
-    BLOCKS_PRE=$((BELLATRIX_SECONDS / 8))
-    BLOCKS_POST=$((POST_BELLATRIX_SECONDS / 4))
-    ESTIMATED_BLOCKS=$((BLOCKS_PRE + BLOCKS_POST))
+    # Auto-calculate: target merge at bellatrix + 32 epochs (at base mining rate).
+    # Extra miners (3x power) start at bellatrix, pulling the actual merge forward
+    # to ~bellatrix + 11 epochs. This ensures merge always happens AFTER bellatrix.
+    # Rate: ~10s avg block time (difficulty grows ~30% by merge, slowing blocks).
+    # Avg difficulty: ~1.3x genesis (difficulty adjustment over mining duration).
+    TARGET_SECONDS=$((GENESIS_DELAY + (BELLATRIX_FORK_EPOCH + 32) * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
+    ESTIMATED_BLOCKS=$((TARGET_SECONDS / 10))
     GENESIS_DIFF_DEC=$(printf "%d" "$GENESIS_DIFFICULTY")
-    TTD=$((ESTIMATED_BLOCKS * GENESIS_DIFF_DEC))
-    MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 1))
-    log "Auto-calculated TTD: $TTD (target merge ~epoch $MERGE_TARGET_EPOCH)"
-    log "  Mining: ${BELLATRIX_SECONDS}s pre-bellatrix (~$BLOCKS_PRE blocks@8s) + ${POST_BELLATRIX_SECONDS}s post (~$BLOCKS_POST blocks@4s)"
-    log "  Total ~$ESTIMATED_BLOCKS blocks × $GENESIS_DIFF_DEC avg difficulty"
+    AVG_DIFFICULTY=$((GENESIS_DIFF_DEC * 13 / 10))
+    TTD=$((ESTIMATED_BLOCKS * AVG_DIFFICULTY))
+    MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 32))
+    log "Auto-calculated TTD: $TTD (target merge ~epoch $MERGE_TARGET_EPOCH at base rate)"
+    log "  Target: ${TARGET_SECONDS}s (~$ESTIMATED_BLOCKS blocks@10s × $AVG_DIFFICULTY avg diff)"
+    log "  With 3x miners after bellatrix, actual merge ~bellatrix+11 epochs"
 else
     log "Using manual TTD: $TTD"
 fi
