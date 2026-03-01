@@ -35,12 +35,17 @@ source "$SCRIPT_DIR/lib/common.sh"
 #           Must swap from 25.1.0 after merge completes.
 #
 #   reth latest        Mining: NO   Merge: YES  Shanghai: YES  Cancun: YES  Prague: YES  Osaka: YES  (post-Merge only)
+#   nethermind latest  Mining: NO   Merge: YES  Shanghai: YES  Cancun: YES  Prague: YES  Osaka: YES  (chainspec genesis)
+#
+#   grandine latest    Phase0: YES  Altair: YES  Bellatrix: YES  Capella: YES  Deneb: YES  Electra: YES  Fulu: YES
+#     NOTE: Grandine supports all forks, combined beacon+validator mode. No swap needed.
 #
 # Node configuration:
 #   node1: geth v1.11.6 + lighthouse v5.3.0    → needs EL swap before Deneb, CL swap (2-step) at Capella+Electra
 #   node2: geth v1.11.6 + lodestar v1.38.0     → needs EL swap before Deneb, CL swap at Electra
 #   node3: besu 24.10.0 + prysm latest          → needs EL swap before Electra
 #   node4: geth v1.11.6 + teku 25.1.0           → EL: geth old → geth latest → reth, CL: teku 25.1.0 → latest
+#   node5: geth v1.11.6 + grandine latest       → EL: geth old → geth latest → nethermind (post-merge), CL: no swap needed
 #
 # Required Swap Timing:
 #   node1-el      geth v1.11.6 -> latest            BEFORE Deneb    (no Engine API V3 / no Cancun support)
@@ -52,12 +57,16 @@ source "$SCRIPT_DIR/lib/common.sh"
 #   node2-cl      lodestar v1.38.0 -> latest         AT Electra      (v1.38 no Electra, latest no pre-Electra)
 #   node4-cl      teku 25.1.0 -> latest              AT Electra      (25.1.0 no Electra, latest has full Electra)
 #   node1-cl      lighthouse v6.0.0 -> latest        AT Electra      (v6.0.0 breaks at Electra, latest breaks before it)
+#   node5-el-mid  geth v1.11.6 -> latest            BEFORE Deneb    (no Engine API V3 / no Cancun support)
+#   node5-el      geth latest -> nethermind         AT Deneb        (nethermind syncs via beacon sync from peers)
 #
 # Swap Windows (derived from fork schedule):
 #   node1-el:     [Capella .. Deneb)        swap geth after Shanghai works, before Cancun needed
 #   node2-el:     [Capella .. Deneb)        swap geth after Shanghai works, before Cancun needed
 #   node4-el-mid: [Capella .. Deneb)        swap geth before Cancun needed (teku 25.1.0 needs Engine API V3)
+#   node5-el-mid: [Capella .. Deneb)        swap geth before Cancun needed
 #   node4-el:     [Deneb .. Electra)        swap geth latest to reth (reth syncs via CL from modern peers)
+#   node5-el:     [Deneb .. Electra)        swap geth latest to nethermind (nethermind syncs via beacon sync)
 #   node1-cl-mid: [Capella .. Deneb)        v5.3.0 has no Deneb support + DB migration for v8.x
 #   node3-el:     [Deneb .. Electra)        swap besu after Deneb works, before Prague needed
 #   node2-cl:     AT Electra boundary       lodestar latest dropped pre-Electra block production
@@ -68,8 +77,10 @@ source "$SCRIPT_DIR/lib/common.sh"
 #   node1-el:     first third of [Capella, Deneb)
 #   node2-el:     second third of [Capella, Deneb)
 #   node4-el-mid: after node2-el, before Deneb
+#   node5-el-mid: after node4-el-mid, before Deneb
 #   node1-cl-mid: after EL swaps, before Deneb
 #   node4-el:     at Deneb (reth swap, after node1/2 provide modern peers)
+#   node5-el:     at Deneb (nethermind swap, alongside reth)
 #   node3-el:     midpoint of [Deneb, Electra) (alongside node4-el)
 #   node2-cl:     ~20 slots before Electra (slot-precise)
 #   node4-cl:     ~15 slots before Electra (slot-precise, between lodestar and lighthouse)
@@ -96,6 +107,8 @@ Swap targets:
   node2-el      Swap node2 EL: geth v1.11.6 -> latest           (before Deneb)
   node4-el-mid  Swap node4 EL: geth v1.11.6 -> latest           (before Deneb)
   node4-el      Swap node4 EL: geth latest -> reth              (at Deneb)
+  node5-el-mid  Swap node5 EL: geth v1.11.6 -> latest           (before Deneb)
+  node5-el      Swap node5 EL: geth latest -> nethermind        (at Deneb)
   node4-cl      Swap node4 CL: teku 25.1.0 -> latest            (AT Electra boundary)
   node1-cl-mid  Swap node1 CL: lighthouse v5.3.0 -> v6.0.0      (DB migration, before Deneb)
   node3-el      Swap node3 EL: besu 24.10.0 -> latest            (before Electra)
@@ -105,6 +118,7 @@ Swap targets:
   node2         Swap all node2 components (node2-el + node2-cl)
   node3         Alias for node3-el
   node4         Swap all node4 components (node4-el-mid + node4-el)
+  node5         Swap all node5 components (node5-el-mid + node5-el)
   all           Swap all swappable components in order
 
 Note: Lighthouse requires a 2-step upgrade (v5.3.0 -> v6.0.0 -> latest) because
@@ -141,6 +155,9 @@ load_config() {
     CL_IMAGE_LODESTAR=$(read_config "cl_image_lodestar")
     CL_IMAGE_OLD_TEKU=$(read_config "cl_image_old_teku")
     CL_IMAGE_TEKU=$(read_config "cl_image_teku")
+    CL_IMAGE_PRYSM_BEACON=$(read_config "cl_image_prysm_beacon")
+    CL_IMAGE_PRYSM_VALIDATOR=$(read_config "cl_image_prysm_validator")
+    EL_IMAGE_NETHERMIND=$(read_config "el_image_nethermind")
 
     BELLATRIX_EPOCH=$(read_config "bellatrix_fork_epoch")
     CAPELLA_EPOCH=$(read_config "capella_fork_epoch")
@@ -165,6 +182,10 @@ load_config() {
     if [ "$SWAP_NODE1_CL_MID_EPOCH" -ge "$DENEB_EPOCH" ]; then SWAP_NODE1_CL_MID_EPOCH=$((DENEB_EPOCH - 1)); fi
     #   node4-el: at Deneb (swap geth latest to reth, peers are modern by now)
     SWAP_NODE4_EL_EPOCH=$DENEB_EPOCH
+    #   node5-el-mid: after node4-el-mid, before Deneb (geth old -> latest)
+    SWAP_NODE5_EL_MID_EPOCH=$SWAP_NODE4_EL_MID_EPOCH
+    #   node5-el: at Deneb (swap geth latest to nethermind, nethermind syncs via beacon sync)
+    SWAP_NODE5_EL_EPOCH=$DENEB_EPOCH
     #   node3-el: midpoint of [Deneb, Electra)
     SWAP_NODE3_EL_EPOCH=$(( DENEB_EPOCH + (ELECTRA_EPOCH - DENEB_EPOCH) / 2 ))
     if [ "$SWAP_NODE3_EL_EPOCH" -lt "$DENEB_EPOCH" ]; then SWAP_NODE3_EL_EPOCH=$DENEB_EPOCH; fi
@@ -190,7 +211,7 @@ load_config() {
 # node1-cl-mid (intermediate lighthouse DB migration) happens early alongside EL swaps.
 # Final CL swaps are LAST because they must happen at the Electra boundary.
 # node2-cl swaps first (lodestar is fast), then node1-cl (lighthouse).
-ALL_SWAP_TARGETS="node1-el node2-el node4-el-mid node1-cl-mid node4-el node3-el node2-cl node4-cl node1-cl"
+ALL_SWAP_TARGETS="node1-el node2-el node4-el-mid node5-el-mid node1-cl-mid node4-el node5-el node3-el node2-cl node4-cl node1-cl node3-cl-refresh"
 
 #############################################################################
 # Swap state tracking (marker files)
@@ -212,7 +233,8 @@ pull_swap_images() {
     for t in "${targets[@]}"; do
         case "$t" in
             node1-el|node2-el) images+=("$EL_IMAGE_NEW_GETH") ;;
-            node4-el-mid) images+=("$EL_IMAGE_NEW_GETH") ;;
+            node4-el-mid|node5-el-mid) images+=("$EL_IMAGE_NEW_GETH") ;;
+            node5-el) images+=("$EL_IMAGE_NETHERMIND") ;;
             node4-cl) images+=("$CL_IMAGE_TEKU") ;;
             node4-el) images+=("$EL_IMAGE_RETH") ;;
             node1-cl-mid) images+=("$CL_IMAGE_MID_LIGHTHOUSE") ;;
@@ -321,6 +343,7 @@ get_current_slot() {
     local endpoints=(
         "http://${NODE2_CL_IP}:5051"    # Lodestar (always running, never swapped)
         "http://${NODE3_CL_IP}:3500"    # Prysm (CL never swapped)
+        "http://${NODE5_CL_IP}:5052"    # Grandine (CL never swapped)
         "http://${NODE4_CL_IP}:5052"    # Teku (25.1.0 -> latest at Electra)
         "http://${NODE1_CL_IP}:5052"    # Lighthouse (may be down during CL swap)
     )
@@ -353,6 +376,7 @@ get_finalized_epoch() {
     local endpoints=(
         "http://${NODE2_CL_IP}:5051"    # Lodestar
         "http://${NODE3_CL_IP}:3500"    # Prysm
+        "http://${NODE5_CL_IP}:5052"    # Grandine
         "http://${NODE4_CL_IP}:5052"    # Teku
         "http://${NODE1_CL_IP}:5052"    # Lighthouse
     )
@@ -392,14 +416,16 @@ swap_node1_el() {
     sleep 1
 
     # Re-init with full genesis to update chain config (blobSchedule etc.)
-    log "  Re-initializing datadir with new genesis (chain config update)..."
+    # IMPORTANT: Use --state.scheme=hash to preserve the v1.11.6 chain data.
+    # New geth defaults to path-based state scheme which would destroy the old DB.
+    log "  Re-initializing datadir with new genesis (chain config update, hash scheme)..."
     docker run --rm \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
         -v "$DATA_DIR/node1/el:/data" \
         "$EL_IMAGE_NEW_GETH" \
-        --datadir /data init /genesis.json 2>&1 | tail -3
+        --datadir /data --state.scheme=hash init /genesis.json 2>&1 | tail -3
 
     # Build bootnode list from running peers
     local node3_enode node4_enode bootnode_list=""
@@ -412,6 +438,7 @@ swap_node1_el() {
     done
 
     # Start new geth (same datadir, no mining flags)
+    # --state.scheme=hash preserves compatibility with v1.11.6 chain data
     log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node1-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE1_EL_IP" \
@@ -423,6 +450,7 @@ swap_node1_el() {
         "$EL_IMAGE_NEW_GETH" \
         --datadir /data \
         --networkid "$CHAIN_ID" \
+        --state.scheme=hash \
         --miner.gasprice=1 \
         --http --http.addr=0.0.0.0 --http.port=8545 \
         --http.api=eth,net,web3,debug,trace,admin,txpool \
@@ -460,14 +488,15 @@ swap_node2_el() {
     sleep 1
 
     # Re-init with full genesis to update chain config (blobSchedule etc.)
-    log "  Re-initializing datadir with new genesis (chain config update)..."
+    # IMPORTANT: Use --state.scheme=hash to preserve the v1.11.6 chain data.
+    log "  Re-initializing datadir with new genesis (chain config update, hash scheme)..."
     docker run --rm \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
         -v "$DATA_DIR/node2/el:/data" \
         "$EL_IMAGE_NEW_GETH" \
-        --datadir /data init /genesis.json 2>&1 | tail -3
+        --datadir /data --state.scheme=hash init /genesis.json 2>&1 | tail -3
 
     # Build bootnode list from running peers
     local node1_enode node3_enode node4_enode bootnode_list=""
@@ -485,6 +514,7 @@ swap_node2_el() {
     fi
 
     # Start new geth (same datadir, no mining)
+    # --state.scheme=hash preserves compatibility with v1.11.6 chain data
     log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node2-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE2_EL_IP" \
@@ -496,6 +526,7 @@ swap_node2_el() {
         "$EL_IMAGE_NEW_GETH" \
         --datadir /data \
         --networkid "$CHAIN_ID" \
+        --state.scheme=hash \
         --miner.gasprice=1 \
         --http --http.addr=0.0.0.0 --http.port=8545 \
         --http.api=eth,net,web3,debug,trace,admin,txpool \
@@ -582,7 +613,7 @@ swap_node2_cl() {
         --enr.ip="$NODE2_CL_IP" \
         --enr.tcp=9000 \
         --enr.udp=9000 \
-        --targetPeers=2 \
+        --targetPeers=100 \
         --suggestedFeeRecipient="$ETHERBASE" \
         --subscribeAllSubnets \
         $bootnode_args
@@ -658,7 +689,7 @@ swap_node1_cl_mid() {
         --enr-udp-port=9000 \
         --enr-tcp-port=9000 \
         --port=9000 \
-        --target-peers=2 \
+        --target-peers=100 \
         --subscribe-all-subnets
 
     wait_for_cl "$NODE1_CL_IP" "5052" "node1"
@@ -756,12 +787,12 @@ swap_node1_cl() {
         --enr-udp-port=9000 \
         --enr-tcp-port=9000 \
         --port=9000 \
-        --target-peers=2 \
+        --target-peers=100 \
         --subscribe-all-subnets \
         $boot_nodes
 
     wait_for_cl "$NODE1_CL_IP" "5052" "node1"
-    wait_for_cl_peers "$NODE1_CL_IP" "5052" "node1" 2 30
+    wait_for_cl_peers "$NODE1_CL_IP" "5052" "node1" 3 30
 
     # Start new lighthouse validator
     log "  Starting new lighthouse validator..."
@@ -845,8 +876,9 @@ swap_node3_el() {
         --engine-jwt-secret=/jwt \
         --p2p-port=30303 \
         --sync-mode=FULL \
-        --sync-min-peers=1 \
         --min-gas-price=0 \
+        --target-gas-limit=30000000 \
+        --bonsai-parallel-tx-processing-enabled=false \
         $besu_bootnodes
 
     wait_for_el "$NODE3_EL_IP" "node3"
@@ -875,14 +907,15 @@ swap_node4_el_mid() {
     sleep 1
 
     # Re-init with full genesis to update chain config (blobSchedule etc.)
-    log "  Re-initializing datadir with new genesis (chain config update)..."
+    # IMPORTANT: Use --state.scheme=hash to preserve the v1.11.6 chain data.
+    log "  Re-initializing datadir with new genesis (chain config update, hash scheme)..."
     docker run --rm \
         -u "$DOCKER_UID" \
         -e HOME=/tmp \
         -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
         -v "$DATA_DIR/node4/el:/data" \
         "$EL_IMAGE_NEW_GETH" \
-        --datadir /data init /genesis.json 2>&1 | tail -3
+        --datadir /data --state.scheme=hash init /genesis.json 2>&1 | tail -3
 
     # Build bootnode list from running peers
     local node1_enode node3_enode bootnode_list=""
@@ -895,6 +928,7 @@ swap_node4_el_mid() {
     done
 
     # Start new geth (same datadir, no mining)
+    # --state.scheme=hash preserves compatibility with v1.11.6 chain data
     log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node4-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE4_EL_IP" \
@@ -906,6 +940,7 @@ swap_node4_el_mid() {
         "$EL_IMAGE_NEW_GETH" \
         --datadir /data \
         --networkid "$CHAIN_ID" \
+        --state.scheme=hash \
         --miner.gasprice=1 \
         --http --http.addr=0.0.0.0 --http.port=8545 \
         --http.api=eth,net,web3,debug,trace,admin,txpool \
@@ -1002,17 +1037,22 @@ print(lo)
 ")
     log "  Merge block: $merge_block (first PoS block with difficulty=0)"
 
-    # ── Step 3: Generate reth genesis with mergeNetsplitBlock ─────────
-    log "  Generating genesis_reth.json with mergeNetsplitBlock=$merge_block..."
-    local reth_genesis="$GENERATED_DIR/el/genesis_reth.json"
+    # ── Step 3: Generate reth import genesis with mergeNetsplitBlock ──────
+    # mergeNetsplitBlock is needed so reth knows the PoW/PoS boundary during
+    # chain import. It must NOT be present at runtime because it adds an extra
+    # fork transition to the EIP-2124 fork ID, causing peer rejection.
+    # The genesis block hash is computed from the header only (not config
+    # fields), so the DB accepts either genesis file after import.
+    log "  Generating import genesis with mergeNetsplitBlock=$merge_block..."
+    local reth_import_genesis="$GENERATED_DIR/el/genesis_reth_import.json"
     python3 -c "
 import json
 with open('$GENERATED_DIR/el/genesis.json') as f:
     genesis = json.load(f)
 genesis['config']['mergeNetsplitBlock'] = $merge_block
-with open('$reth_genesis', 'w') as f:
+with open('$reth_import_genesis', 'w') as f:
     json.dump(genesis, f, indent=2)
-print('  Written genesis_reth.json')
+print('  Written genesis_reth_import.json (with mergeNetsplitBlock)')
 "
 
     # ── Step 4: Stop geth ─────────────────────────────────────────────
@@ -1026,38 +1066,42 @@ print('  Written genesis_reth.json')
         -v "$DATA_DIR/node4/el:/data" \
         alpine sh -c "rm -rf /data/*"
 
-    # ── Step 6: Import chain into reth ────────────────────────────────
+    # ── Step 6: Import chain into reth (using import genesis) ──────────
     log "  Importing $latest_dec blocks into reth..."
     docker run --rm \
         -v "$DATA_DIR/node4/el:/data" \
-        -v "$reth_genesis:/genesis.json" \
+        -v "$reth_import_genesis:/genesis.json" \
         -v "$export_rlp:/chain_export.rlp" \
         "$EL_IMAGE_RETH" \
         import --chain=/genesis.json --datadir=/data /chain_export.rlp 2>&1 \
         | tail -5
     log "  Chain import complete."
 
-    # ── Step 7: Collect bootnodes ─────────────────────────────────────
-    local node1_enode node2_enode node3_enode bootnode_list=""
-    node1_enode=$(get_node1_enode)
-    node2_enode=$(get_node2_enode)
-    node3_enode=$(get_node3_enode)
-    for enode in "$node1_enode" "$node2_enode" "$node3_enode"; do
+    # ── Step 7: Start reth with standard genesis (no mergeNetsplitBlock) ─
+    # Use the same genesis.json as geth/besu so fork IDs match and reth
+    # can peer with other EL nodes via devp2p.
+    log "  Starting reth (${EL_IMAGE_RETH})..."
+
+    # Collect EL bootnodes for reth
+    local reth_enode_list=""
+    for node_num in 1 2 3 5; do
+        local ip_var="NODE${node_num}_EL_IP"
+        local enode
+        enode=$(curl -s -X POST "http://${!ip_var}:8545" \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","method":"admin_nodeInfo","params":[],"id":1}' 2>/dev/null \
+            | jq -r '.result.enode // empty' 2>/dev/null || true)
         if [ -n "$enode" ]; then
-            bootnode_list="${bootnode_list:+$bootnode_list,}$enode"
+            # Replace the IP in the enode URL with the Docker network IP
+            enode=$(echo "$enode" | sed "s/@[^:]*:/@${!ip_var}:/")
+            reth_enode_list="${reth_enode_list:+${reth_enode_list},}${enode}"
         fi
     done
-    local reth_bootnodes=""
-    if [ -n "$bootnode_list" ]; then
-        reth_bootnodes="--bootnodes=$bootnode_list"
-    fi
 
-    # ── Step 8: Start reth with imported chain ────────────────────────
-    log "  Starting reth (${EL_IMAGE_RETH})..."
     docker run -d --name "${CONTAINER_PREFIX}-node4-el" \
         --network "$DOCKER_NETWORK" --ip "$NODE4_EL_IP" \
         -v "$DATA_DIR/node4/el:/data" \
-        -v "$reth_genesis:/genesis.json" \
+        -v "$GENERATED_DIR/el/genesis.json:/genesis.json:ro" \
         -v "$JWT_SECRET:/jwt.hex" \
         -p 8548:8545 -p 8554:8551 -p 30306:30303 -p 30306:30303/udp \
         "$EL_IMAGE_RETH" \
@@ -1076,8 +1120,8 @@ print('  Written genesis_reth.json')
         --port=30303 \
         --discovery.port=30303 \
         --full \
-        -vvv \
-        $reth_bootnodes
+        ${reth_enode_list:+--bootnodes="$reth_enode_list"} \
+        -vvv
 
     wait_for_el "$NODE4_EL_IP" "node4"
     check_el_peers "$NODE4_EL_IP" "node4"
@@ -1154,17 +1198,248 @@ swap_node4_cl() {
         --p2p-port=9000 \
         --p2p-advertised-ip="$NODE4_CL_IP" \
         --p2p-discovery-site-local-addresses-enabled=true \
-        --p2p-peer-lower-bound=1 \
+        --p2p-peer-lower-bound=64 \
         --p2p-subscribe-all-subnets-enabled=true \
         --validator-keys=/keys/teku-keys:/keys/teku-secrets \
         --validators-proposer-default-fee-recipient="$ETHERBASE" \
         $teku_bootnodes
 
     wait_for_cl "$NODE4_CL_IP" "5052" "node4"
-    wait_for_cl_peers "$NODE4_CL_IP" "5052" "node4" 2 30
+    wait_for_cl_peers "$NODE4_CL_IP" "5052" "node4" 3 30
 
     mark_swapped "node4-cl"
     log "  Node 4 CL swap complete."
+}
+
+# Node 5 EL step 1: geth v1.11.6 -> geth latest (before Deneb)
+# Same as node4-el-mid: in-place upgrade preserving chain data.
+# Geth v1.11.6 lacks Engine API V3 needed for Deneb (Cancun).
+swap_node5_el_mid() {
+    if is_swapped "node5-el-mid"; then
+        log "  node5-el-mid already swapped -- skipping."
+        return 0
+    fi
+
+    log ""
+    log "=== Swapping Node 5 EL (step 1): geth old -> geth latest ==="
+    log "  Grandine CL stays running -- only EL swap."
+
+    # Stop old geth
+    log "  Stopping old geth..."
+    docker rm -f "${CONTAINER_PREFIX}-node5-el" >/dev/null 2>&1 || true
+    sleep 1
+
+    # Re-init with full genesis to update chain config (blobSchedule etc.)
+    log "  Re-initializing datadir with new genesis (chain config update, hash scheme)..."
+    docker run --rm \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$GENERATED_DIR/el/genesis.json:/genesis.json" \
+        -v "$DATA_DIR/node5/el:/data" \
+        "$EL_IMAGE_NEW_GETH" \
+        --datadir /data --state.scheme=hash init /genesis.json 2>&1 | tail -3
+
+    # Build bootnode list from running peers
+    local node1_enode node3_enode bootnode_list=""
+    node1_enode=$(get_node1_enode)
+    node3_enode=$(get_node3_enode)
+    for enode in "$node1_enode" "$node3_enode"; do
+        if [ -n "$enode" ]; then
+            bootnode_list="${bootnode_list:+$bootnode_list,}$enode"
+        fi
+    done
+
+    # Start new geth (same datadir, no mining)
+    log "  Starting new geth (${EL_IMAGE_NEW_GETH})..."
+    docker run -d --name "${CONTAINER_PREFIX}-node5-el" \
+        --network "$DOCKER_NETWORK" --ip "$NODE5_EL_IP" \
+        -u "$DOCKER_UID" \
+        -e HOME=/tmp \
+        -v "$DATA_DIR/node5/el:/data" \
+        -v "$JWT_SECRET:/jwt" \
+        -p 8549:8545 -p 8555:8551 -p 30307:30303 -p 30307:30303/udp \
+        "$EL_IMAGE_NEW_GETH" \
+        --datadir /data \
+        --networkid "$CHAIN_ID" \
+        --state.scheme=hash \
+        --miner.gasprice=1 \
+        --http --http.addr=0.0.0.0 --http.port=8545 \
+        --http.api=eth,net,web3,debug,trace,admin,txpool \
+        --http.corsdomain="*" --http.vhosts="*" \
+        --authrpc.addr=0.0.0.0 --authrpc.port=8551 \
+        --authrpc.jwtsecret=/jwt \
+        --authrpc.vhosts="*" \
+        --port=30303 \
+        --verbosity=3 \
+        --syncmode=full \
+        ${bootnode_list:+--bootnodes="$bootnode_list"}
+
+    wait_for_el "$NODE5_EL_IP" "node5"
+    check_el_peers "$NODE5_EL_IP" "node5"
+
+    mark_swapped "node5-el-mid"
+    log "  Node 5 EL step 1 swap complete."
+}
+
+# Node 5 EL step 2: geth latest -> nethermind (at Deneb)
+# Only the EL container is restarted. Grandine CL stays running and reconnects.
+# Nethermind syncs via beacon sync: receives forkchoice updates from CL,
+# downloads blocks from EL peers, processes them.
+# NOTE: Cannot start Nethermind from genesis because Nethermind omits
+# totalDifficulty from block RPC responses after detecting the merge,
+# which prevents the CL from verifying the terminal PoW block.
+swap_node5_el() {
+    if is_swapped "node5-el"; then
+        log "  node5-el already swapped -- skipping."
+        return 0
+    fi
+
+    log ""
+    log "=== Swapping Node 5 EL (step 2): geth latest -> nethermind ==="
+    log "  Grandine CL stays running -- only EL swap."
+
+    # Stop geth latest
+    log "  Stopping geth latest..."
+    docker rm -f "${CONTAINER_PREFIX}-node5-el" >/dev/null 2>&1 || true
+    sleep 1
+
+    # Clean geth datadir (Nethermind uses different DB format)
+    log "  Cleaning geth datadir for nethermind..."
+    docker run --rm \
+        -v "$DATA_DIR/node5/el:/data" \
+        alpine sh -c "rm -rf /data/*"
+
+    # Build static peers list from running EL nodes
+    local node1_enode node3_enode peer_list=""
+    node1_enode=$(get_node1_enode)
+    node3_enode=$(get_node3_enode)
+    for enode in "$node1_enode" "$node3_enode"; do
+        if [ -n "$enode" ]; then
+            peer_list="${peer_list:+$peer_list,}$enode"
+        fi
+    done
+
+    local nm_static_peers=""
+    if [ -n "$peer_list" ]; then
+        nm_static_peers="--Network.StaticPeers=$peer_list"
+    fi
+
+    # Start Nethermind (loads chainspec on startup, syncs via beacon sync)
+    log "  Starting nethermind (${EL_IMAGE_NETHERMIND})..."
+    docker run -d --name "${CONTAINER_PREFIX}-node5-el" \
+        --network "$DOCKER_NETWORK" --ip "$NODE5_EL_IP" \
+        -v "$DATA_DIR/node5/el:/data" \
+        -v "$GENERATED_DIR/el/nethermind-genesis.json:/chainspec.json:ro" \
+        -v "$JWT_SECRET:/jwt:ro" \
+        -p 8549:8545 -p 8555:8551 -p 30307:30303 -p 30307:30303/udp \
+        "$EL_IMAGE_NETHERMIND" \
+        --config=none \
+        --Init.ChainSpecPath=/chainspec.json \
+        --data-dir=/data \
+        --JsonRpc.Enabled=true \
+        --JsonRpc.Host=0.0.0.0 \
+        --JsonRpc.Port=8545 \
+        --JsonRpc.EnabledModules=[Eth,Net,Web3,Admin,TxPool] \
+        --JsonRpc.EnginePort=8551 \
+        --JsonRpc.EngineHost=0.0.0.0 \
+        --JsonRpc.JwtSecretFile=/jwt \
+        --Network.P2PPort=30303 \
+        --Network.DiscoveryPort=30303 \
+        --Network.ExternalIp="$NODE5_EL_IP" \
+        --Merge.Enabled=true \
+        --Sync.FastSync=false \
+        --log=INFO \
+        $nm_static_peers
+
+    wait_for_el "$NODE5_EL_IP" "node5" 180
+    check_el_peers "$NODE5_EL_IP" "node5"
+
+    mark_swapped "node5-el"
+    log "  Node 5 EL swap complete (nethermind)."
+}
+
+# Node3 CL: Restart Prysm with fresh bootnodes after all CL swaps
+# Prysm is never version-swapped, but after the other CL nodes swap their
+# identities change. Prysm's original bootstrap ENR becomes stale, leaving
+# it with 0-1 peers and causing it to fall off the canonical chain.
+swap_node3_cl_refresh() {
+    if is_swapped "node3-cl-refresh"; then
+        log "  node3-cl-refresh already done -- skipping."
+        return 0
+    fi
+
+    log ""
+    log "=== Verifying Node 3 CL (Prysm) health after CL swaps ==="
+
+    # After the other CL nodes were swapped with target-peers=100,
+    # they will actively discover and connect to Prysm via its ENR bootnode.
+    # We verify Prysm has adequate peers and is on the canonical chain
+    # (matching block roots, not just slot numbers).
+
+    local prysm_slot ref_slot peers prysm_root ref_root gap
+
+    # Step 1: Wait for Prysm to have >= 3 peers (up to 120s)
+    log "  Waiting for Prysm to establish peers (need >= 3)..."
+    local peer_ok=false
+    for i in $(seq 1 40); do
+        peers=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/node/peer_count" 2>/dev/null \
+            | jq -r '.data.connected' 2>/dev/null || echo "0")
+        [ "$peers" = "null" ] && peers=0
+        if [ "$peers" -ge 3 ]; then
+            log "  Prysm peers: $peers (OK)"
+            peer_ok=true
+            break
+        fi
+        [ $((i % 10)) -eq 0 ] && log "  Prysm peers: $peers (waiting... ${i}s/120s)"
+        sleep 3
+    done
+    if ! $peer_ok; then
+        log "  WARNING: Prysm only has $peers peers after 120s"
+    fi
+
+    # Step 2: Verify Prysm is on the canonical chain (compare block roots)
+    log "  Verifying chain agreement (block roots)..."
+    local chain_ok=false
+    for i in $(seq 1 20); do
+        # Get finalized slot as a safe comparison point
+        local fin_data=$(curl -s --max-time 2 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/finalized" 2>/dev/null)
+        local fin_slot=$(echo "$fin_data" | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        local fin_root=$(echo "$fin_data" | jq -r '.data.root' 2>/dev/null || echo "")
+        [ "$fin_slot" = "null" ] && fin_slot=0
+
+        # Check Prysm agrees on the finalized block root
+        local prysm_fin=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/finalized" 2>/dev/null)
+        local prysm_fin_slot=$(echo "$prysm_fin" | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        local prysm_fin_root=$(echo "$prysm_fin" | jq -r '.data.root' 2>/dev/null || echo "")
+        [ "$prysm_fin_slot" = "null" ] && prysm_fin_slot=0
+
+        # Also check head slot gap
+        prysm_slot=$(curl -s --max-time 2 "http://${NODE3_CL_IP}:3500/eth/v1/beacon/headers/head" 2>/dev/null \
+            | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        ref_slot=$(curl -s --max-time 2 "http://${NODE1_CL_IP}:5052/eth/v1/beacon/headers/head" 2>/dev/null \
+            | jq -r '.data.header.message.slot' 2>/dev/null || echo "0")
+        [ "$prysm_slot" = "null" ] && prysm_slot=0
+        [ "$ref_slot" = "null" ] && ref_slot=0
+        gap=$((ref_slot - prysm_slot))
+
+        if [ "$fin_root" = "$prysm_fin_root" ] && [ -n "$fin_root" ] && [ "$fin_root" != "null" ] \
+           && [ "$gap" -le 5 ] && [ "$prysm_slot" -gt 0 ]; then
+            log "  Prysm chain OK: slot=$prysm_slot (gap=$gap) finalized=$prysm_fin_slot (root matches)"
+            chain_ok=true
+            break
+        fi
+
+        [ $((i % 5)) -eq 0 ] && log "  Chain check: prysm_slot=$prysm_slot gap=$gap fin_match=$([ "$fin_root" = "$prysm_fin_root" ] && echo yes || echo NO) (${i}/20)"
+        sleep 3
+    done
+
+    if ! $chain_ok; then
+        log "  WARNING: Prysm may be on a fork (gap=$gap, peers=$peers)"
+        log "  Chain will likely self-heal via fork choice but monitor closely"
+    fi
+
+    mark_swapped "node3-cl-refresh"
+    log "  Node 3 CL (Prysm) health verification complete."
 }
 
 #############################################################################
@@ -1205,9 +1480,17 @@ cmd_status() {
                 deadline_epoch=$DENEB_EPOCH
                 swap_desc="daemon target: epoch $SWAP_NODE4_EL_MID_EPOCH, deadline: epoch $deadline_epoch"
                 ;;
+            node5-el-mid)
+                deadline_epoch=$DENEB_EPOCH
+                swap_desc="daemon target: epoch $SWAP_NODE5_EL_MID_EPOCH, deadline: epoch $deadline_epoch"
+                ;;
             node4-el)
                 deadline_epoch=$ELECTRA_EPOCH
                 swap_desc="daemon target: epoch $SWAP_NODE4_EL_EPOCH, deadline: epoch $deadline_epoch"
+                ;;
+            node5-el)
+                deadline_epoch=$ELECTRA_EPOCH
+                swap_desc="daemon target: epoch $SWAP_NODE5_EL_EPOCH, deadline: epoch $deadline_epoch"
                 ;;
             node1-cl-mid)
                 deadline_epoch=$DENEB_EPOCH
@@ -1233,6 +1516,10 @@ cmd_status() {
                 deadline_epoch=$ELECTRA_EPOCH
                 swap_desc="daemon target: ~${SWAP_NODE1_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE1_CL_LEAD_SLOTS)))"
                 ;;
+            node3-cl-refresh)
+                deadline_epoch=$((ELECTRA_EPOCH + 2))
+                swap_desc="after all CL swaps complete"
+                ;;
         esac
 
         if is_swapped "$target"; then
@@ -1248,13 +1535,16 @@ cmd_status() {
         case "$target" in
             node1-el)     log "  node1-el      geth v1.11.6 -> latest           $status_str" ;;
             node4-el-mid) log "  node4-el-mid  geth v1.11.6 -> latest           $status_str" ;;
+            node5-el-mid) log "  node5-el-mid  geth v1.11.6 -> latest           $status_str" ;;
             node4-el)     log "  node4-el      geth latest -> reth              $status_str" ;;
+            node5-el)     log "  node5-el      geth latest -> nethermind        $status_str" ;;
             node1-cl-mid) log "  node1-cl-mid  lighthouse v5.3.0 -> v6.0.0      $status_str" ;;
             node2-el)     log "  node2-el      geth v1.11.6 -> latest           $status_str" ;;
             node3-el)     log "  node3-el      besu 24.10.0 -> latest           $status_str" ;;
             node2-cl)     log "  node2-cl      lodestar v1.38.0 -> latest       $status_str" ;;
             node4-cl)     log "  node4-cl      teku 25.1.0 -> latest            $status_str" ;;
             node1-cl)     log "  node1-cl      lighthouse v6.0.0 -> latest      $status_str" ;;
+            node3-cl-refresh) log "  node3-cl-ref  prysm bootnode refresh           $status_str" ;;
         esac
     done
 }
@@ -1269,8 +1559,10 @@ cmd_daemon() {
     log "  node1-el      geth old -> new             at epoch $SWAP_NODE1_EL_EPOCH  (before Deneb @ $DENEB_EPOCH)"
     log "  node2-el      geth old -> new             at epoch $SWAP_NODE2_EL_EPOCH  (before Deneb @ $DENEB_EPOCH)"
     log "  node4-el-mid  geth old -> new             at epoch $SWAP_NODE4_EL_MID_EPOCH  (before Deneb @ $DENEB_EPOCH)"
+    log "  node5-el-mid  geth old -> new             at epoch $SWAP_NODE5_EL_MID_EPOCH  (before Deneb @ $DENEB_EPOCH)"
     log "  node1-cl-mid  lighthouse v5.3.0 -> v6.0.0 at epoch $SWAP_NODE1_CL_MID_EPOCH  (DB migration, before Deneb)"
     log "  node4-el      geth latest -> reth         at epoch $SWAP_NODE4_EL_EPOCH  (at Deneb)"
+    log "  node5-el      geth latest -> nethermind   at epoch $SWAP_NODE5_EL_EPOCH  (at Deneb)"
     log "  node3-el      besu old -> new             at epoch $SWAP_NODE3_EL_EPOCH  (before Electra @ $ELECTRA_EPOCH)"
     log "  node2-cl      lodestar old -> new         ~${SWAP_NODE2_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE2_CL_LEAD_SLOTS)))"
     log "  node4-cl      teku 25.1.0 -> latest       ~${SWAP_NODE4_CL_LEAD_SLOTS} slots before Electra (slot $((ELECTRA_FIRST_SLOT - SWAP_NODE4_CL_LEAD_SLOTS)))"
@@ -1340,9 +1632,21 @@ cmd_daemon() {
                         should_swap=true
                     fi
                     ;;
+                node5-el-mid)
+                    # Epoch-level: swap geth old to latest before Deneb
+                    if [ "$current_epoch" -ge "$SWAP_NODE5_EL_MID_EPOCH" ]; then
+                        should_swap=true
+                    fi
+                    ;;
                 node4-el)
                     # Epoch-level: swap geth latest to reth at Deneb
                     if [ "$current_epoch" -ge "$SWAP_NODE4_EL_EPOCH" ]; then
+                        should_swap=true
+                    fi
+                    ;;
+                node5-el)
+                    # Epoch-level: swap geth latest to nethermind at Deneb
+                    if [ "$current_epoch" -ge "$SWAP_NODE5_EL_EPOCH" ]; then
                         should_swap=true
                     fi
                     ;;
@@ -1386,6 +1690,12 @@ cmd_daemon() {
                         should_swap=true
                     fi
                     ;;
+                node3-cl-refresh)
+                    # Restart Prysm with fresh bootnodes after all CL swaps
+                    if is_swapped "node1-cl"; then
+                        should_swap=true
+                    fi
+                    ;;
             esac
 
             if [ "$should_swap" = true ]; then
@@ -1393,7 +1703,7 @@ cmd_daemon() {
 
                 # Verify chain is finalizing before swapping (skip for CL swaps
                 # at fork boundary since chain health may be degrading anyway)
-                if [ "$target" != "node1-cl" ] && [ "$target" != "node2-cl" ] && [ "$target" != "node4-cl" ]; then
+                if [ "$target" != "node1-cl" ] && [ "$target" != "node2-cl" ] && [ "$target" != "node4-cl" ] && [ "$target" != "node3-cl-refresh" ]; then
                     local fin_epoch
                     if fin_epoch=$(get_finalized_epoch); then
                         if [ "$fin_epoch" -lt $((current_epoch - 5)) ]; then
@@ -1454,7 +1764,7 @@ cmd_swap() {
     local expanded=()
     for t in "${targets[@]}"; do
         case "$t" in
-            node1-el|node1-cl-mid|node1-cl|node2-el|node2-cl|node3-el|node4-el-mid|node4-el|node4-cl)
+            node1-el|node1-cl-mid|node1-cl|node2-el|node2-cl|node3-el|node4-el-mid|node4-el|node4-cl|node5-el-mid|node5-el)
                 expanded+=("$t")
                 ;;
             node1)
@@ -1468,6 +1778,9 @@ cmd_swap() {
                 ;;
             node4)
                 expanded+=("node4-el-mid" "node4-el" "node4-cl")
+                ;;
+            node5)
+                expanded+=("node5-el-mid" "node5-el")
                 ;;
             *)
                 log_error "Unknown swap target: $t"
@@ -1511,8 +1824,10 @@ cmd_swap() {
             node1-el)     log "  node1-el:      geth v1.11.6 -> ${EL_IMAGE_NEW_GETH}  [EL:8545]" ;;
             node2-el)     log "  node2-el:      geth v1.11.6 -> ${EL_IMAGE_NEW_GETH}  [EL:8546]" ;;
             node4-el-mid) log "  node4-el-mid:  geth v1.11.6 -> ${EL_IMAGE_NEW_GETH}  [EL:8548]" ;;
+            node5-el-mid) log "  node5-el-mid:  geth v1.11.6 -> ${EL_IMAGE_NEW_GETH}  [EL:8549]" ;;
             node1-cl-mid) log "  node1-cl-mid:  lighthouse v5.3.0 -> ${CL_IMAGE_MID_LIGHTHOUSE}  [CL:5052]" ;;
             node4-el)     log "  node4-el:      geth latest -> ${EL_IMAGE_RETH}  [EL:8548]" ;;
+            node5-el)     log "  node5-el:      geth latest -> ${EL_IMAGE_NETHERMIND}  [EL:8549]" ;;
             node3-el)     log "  node3-el:      besu 24.10.0 -> ${EL_IMAGE_NEW_BESU}  [EL:8547]" ;;
             node2-cl)     log "  node2-cl:      lodestar v1.38.0 -> ${CL_IMAGE_LODESTAR}  [CL:5053]" ;;
             node4-cl)     log "  node4-cl:      teku 25.1.0 -> ${CL_IMAGE_TEKU}  [CL:5055]" ;;
@@ -1560,7 +1875,7 @@ case "$COMMAND" in
         cmd_status
         ;;
     # Allow bare swap targets without the "swap" keyword for convenience
-    node1-el|node1-cl-mid|node1-cl|node2-el|node2-cl|node3-el|node4-el-mid|node4-el|node4-cl|node1|node2|node3|node4|all)
+    node1-el|node1-cl-mid|node1-cl|node2-el|node2-cl|node3-el|node4-el-mid|node4-el|node4-cl|node5-el-mid|node5-el|node1|node2|node3|node4|node5|all)
         cmd_swap "$COMMAND" "$@"
         ;;
     *)

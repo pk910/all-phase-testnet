@@ -15,7 +15,14 @@ SLOTS_PER_EPOCH=$(read_config "slots_per_epoch")
 GENESIS_DIFFICULTY=$(read_config "genesis_difficulty")
 GENESIS_GASLIMIT=$(read_config_default "genesis_gaslimit" "30000000")
 VALIDATORS_PER_NODE=$(read_config "validators_per_node")
+GENESIS_VALIDATORS_COUNT=$(read_config_default "genesis_validators_count" "")
 VALIDATOR_MNEMONIC=$(read_config "validator_mnemonic")
+VALIDATOR_MNEMONICS=$(read_config_default "validator_mnemonics" "")
+
+# Gated deposit contract
+DEPOSIT_CONTRACT_GATED=$(read_config_default "deposit_contract_gated" "false")
+DEPOSIT_CONTRACT_ADMINS=$(read_config_default "deposit_contract_admins" "[]")
+DEPOSIT_CONTRACT_SETTINGS=$(read_config_default "deposit_contract_settings" "{}")
 
 # Fork epochs
 ALTAIR_FORK_EPOCH=$(read_config "altair_fork_epoch")
@@ -24,6 +31,9 @@ CAPELLA_FORK_EPOCH=$(read_config "capella_fork_epoch")
 DENEB_FORK_EPOCH=$(read_config "deneb_fork_epoch")
 ELECTRA_FORK_EPOCH=$(read_config "electra_fork_epoch")
 FULU_FORK_EPOCH=$(read_config "fulu_fork_epoch")
+
+# Fork version prefix (3 bytes; last byte = fork ID)
+FORK_VERSION_PREFIX=$(read_config_default "fork_version_prefix" "0x100000")
 
 # BPO (Blob Parameter Override) schedule
 BPO1_FORK_EPOCH=$(read_config_default "bpo1_fork_epoch" "")
@@ -46,22 +56,20 @@ CL_GENESIS_TIME=$((GENESIS_TIMESTAMP + GENESIS_DELAY))
 # TTD calculation
 TTD=$(read_config "terminal_total_difficulty")
 if [ -z "$TTD" ] || [ "$TTD" = "null" ]; then
-    # Auto-calculate: target merge ~1 epoch after bellatrix
-    # Extra miners start at bellatrix; TTD must be unreachable by 2 base miners alone.
-    # Two phases:
-    #   Pre-bellatrix: 2 CPU miners (geth + besu), ~8s avg block time
-    #   Post-bellatrix: 4 CPU miners (+ 2 extra from merge boost), ~4s avg
-    BELLATRIX_SECONDS=$((GENESIS_DELAY + BELLATRIX_FORK_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
-    POST_BELLATRIX_SECONDS=$((1 * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))  # 1 epoch target
-    BLOCKS_PRE=$((BELLATRIX_SECONDS / 8))
-    BLOCKS_POST=$((POST_BELLATRIX_SECONDS / 4))
-    ESTIMATED_BLOCKS=$((BLOCKS_PRE + BLOCKS_POST))
+    # Auto-calculate: target merge midway between bellatrix and capella (at base rate).
+    # Extra miners (3x power) start at bellatrix, pulling the actual merge forward.
+    # Rate: ~10s avg block time (difficulty grows ~30% by merge, slowing blocks).
+    # Avg difficulty: ~1.3x genesis (difficulty adjustment over mining duration).
+    MERGE_TARGET_EPOCH=$(( (BELLATRIX_FORK_EPOCH + CAPELLA_FORK_EPOCH) / 2 ))
+    TARGET_SECONDS=$((GENESIS_DELAY + MERGE_TARGET_EPOCH * SLOTS_PER_EPOCH * SECONDS_PER_SLOT))
+    ESTIMATED_BLOCKS=$((TARGET_SECONDS / 10))
     GENESIS_DIFF_DEC=$(printf "%d" "$GENESIS_DIFFICULTY")
-    TTD=$((ESTIMATED_BLOCKS * GENESIS_DIFF_DEC))
-    MERGE_TARGET_EPOCH=$((BELLATRIX_FORK_EPOCH + 1))
-    log "Auto-calculated TTD: $TTD (target merge ~epoch $MERGE_TARGET_EPOCH)"
-    log "  Mining: ${BELLATRIX_SECONDS}s pre-bellatrix (~$BLOCKS_PRE blocks@8s) + ${POST_BELLATRIX_SECONDS}s post (~$BLOCKS_POST blocks@4s)"
-    log "  Total ~$ESTIMATED_BLOCKS blocks × $GENESIS_DIFF_DEC avg difficulty"
+    AVG_DIFFICULTY=$((GENESIS_DIFF_DEC * 13 / 10))
+    TTD=$((ESTIMATED_BLOCKS * AVG_DIFFICULTY))
+    log "Auto-calculated TTD: $TTD (target merge ~epoch $MERGE_TARGET_EPOCH at base rate)"
+    log "  Midpoint of bellatrix($BELLATRIX_FORK_EPOCH) and capella($CAPELLA_FORK_EPOCH)"
+    log "  Target: ${TARGET_SECONDS}s (~$ESTIMATED_BLOCKS blocks@10s × $AVG_DIFFICULTY avg diff)"
+    log "  With 3x miners after bellatrix, actual merge pulled earlier"
 else
     log "Using manual TTD: $TTD"
 fi
@@ -120,21 +128,66 @@ GENESIS_GASLIMIT_HEX="0x$(printf "%x" "$GENESIS_GASLIMIT")"
 GENESIS_TIMESTAMP_HEX="0x$(printf "%x" "$GENESIS_TIMESTAMP")"
 
 # Extract deposit contract from ethereum-genesis-generator docker image
-log "  Extracting deposit contract from ethereum-genesis-generator image..."
-TMPFILE=$(mktemp)
-trap "rm -f $TMPFILE" EXIT
-docker run --rm --entrypoint "" \
-    "ethpandaops/ethereum-genesis-generator:master" \
-    cat /apps/el-gen/system-contracts.yaml > "$TMPFILE" 2>/dev/null
+GENESIS_GEN_IMAGE=$(read_config_default "genesis_generator_image" "ethpandaops/ethereum-genesis-generator:rebuild-gated-deposit-contract")
+TMPDIR_CONTRACTS=$(mktemp -d)
+trap "rm -rf $TMPDIR_CONTRACTS" EXIT
 
-if [ ! -s "$TMPFILE" ]; then
-    log_error "Could not extract system-contracts.yaml from docker image"
-    exit 1
-fi
+if [ "$DEPOSIT_CONTRACT_GATED" = "true" ] || [ "$DEPOSIT_CONTRACT_GATED" = "True" ]; then
+    log "  Extracting GATED deposit contract from genesis-generator image..."
+    docker run --rm --entrypoint "" \
+        "$GENESIS_GEN_IMAGE" \
+        cat /apps/el-gen/gated-deposit-contract.yaml > "$TMPDIR_CONTRACTS/gated.yaml" 2>/dev/null
 
-DEPOSIT_ALLOC=$(python3 -c "
+    if [ ! -s "$TMPDIR_CONTRACTS/gated.yaml" ]; then
+        log_error "Could not extract gated-deposit-contract.yaml from docker image"
+        exit 1
+    fi
+
+    # Parse gated deposit contract and gater contract using Python YAML
+    python3 - "$TMPDIR_CONTRACTS/gated.yaml" << 'PYEOF' > "$TMPDIR_CONTRACTS/parsed.sh"
+import yaml, json, sys, base64
+
+with open(sys.argv[1]) as f:
+    data = yaml.safe_load(f)
+
+deposit = data.get("deposit")
+gater = data.get("deposit_gater")
+gater_addr = data.get("deposit_gater_address", "0x00000000a11acc355c0de0000a11acc355c0de00")
+
+if not deposit or not gater:
+    sys.exit(1)
+
+dep_json = base64.b64encode(json.dumps(deposit).encode()).decode()
+gater_json = base64.b64encode(json.dumps(gater).encode()).decode()
+
+print(f'DEPOSIT_ALLOC_B64="{dep_json}"')
+print(f'GATER_ALLOC_B64="{gater_json}"')
+print(f'GATER_ADDRESS="{gater_addr}"')
+PYEOF
+    source "$TMPDIR_CONTRACTS/parsed.sh"
+    DEPOSIT_ALLOC=$(echo "$DEPOSIT_ALLOC_B64" | base64 -d)
+    GATER_ALLOC=$(echo "$GATER_ALLOC_B64" | base64 -d)
+
+    if [ -z "$DEPOSIT_ALLOC" ] || [ -z "$GATER_ALLOC" ]; then
+        log_error "Could not parse gated deposit contracts"
+        exit 1
+    fi
+    log "  Gated deposit contract: $DEPOSIT_CONTRACT"
+    log "  Gater contract: $GATER_ADDRESS"
+else
+    log "  Extracting standard deposit contract from genesis-generator image..."
+    docker run --rm --entrypoint "" \
+        "$GENESIS_GEN_IMAGE" \
+        cat /apps/el-gen/system-contracts.yaml > "$TMPDIR_CONTRACTS/system.yaml" 2>/dev/null
+
+    if [ ! -s "$TMPDIR_CONTRACTS/system.yaml" ]; then
+        log_error "Could not extract system-contracts.yaml from docker image"
+        exit 1
+    fi
+
+    DEPOSIT_ALLOC=$(python3 -c "
 import json, re, sys
-with open('$TMPFILE') as f:
+with open('$TMPDIR_CONTRACTS/system.yaml') as f:
     content = f.read()
 match = re.search(r'deposit:\s*(\{.*?\n\})', content, re.DOTALL)
 if match:
@@ -142,6 +195,9 @@ if match:
 else:
     sys.exit(1)
 ")
+    GATER_ADDRESS=""
+    GATER_ALLOC=""
+fi
 
 if [ -z "$DEPOSIT_ALLOC" ]; then
     log_error "Could not load deposit contract bytecode"
@@ -158,7 +214,7 @@ log "  Deriving pre-funded accounts from mnemonic..."
 > "$GENERATED_DIR/prefunded_accounts.txt"
 for idx in $(seq 0 $((PREFUND_COUNT - 1))); do
     OUTPUT=$(docker run --rm --entrypoint "" \
-        "ethpandaops/ethereum-genesis-generator:master" \
+        "$GENESIS_GEN_IMAGE" \
         geth-hdwallet -mnemonic "$PREFUND_MNEMONIC" -path "m/44'/60'/0'/0/$idx")
     ADDR=$(echo "$OUTPUT" | grep "public address:" | awk '{print $3}')
     KEY=$(echo "$OUTPUT" | grep "private key:" | awk '{print $3}')
@@ -237,6 +293,51 @@ for i in range(256):
 # Add deposit contract
 deposit = json.loads('$DEPOSIT_ALLOC')
 genesis["alloc"]["$DEPOSIT_CONTRACT"] = deposit
+
+# Add gater contract (if gated deposit enabled)
+gater_address = "$GATER_ADDRESS"
+gater_alloc_json = '''$GATER_ALLOC'''
+if gater_address and gater_alloc_json.strip():
+    gater = json.loads(gater_alloc_json)
+    # Add admin addresses to gater storage
+    # Admin role prefix: 0xacce55000000000000000000 + address (20 bytes)
+    # Value 2 = sticky admin
+    admins_json = '''$DEPOSIT_CONTRACT_ADMINS'''
+    admins = json.loads(admins_json) if admins_json.strip() and admins_json.strip() != '[]' else []
+    # Read first prefunded account as default admin
+    with open("$GENERATED_DIR/prefunded_accounts.txt") as f:
+        lines = [l.strip() for l in f if l.strip()]
+        if lines:
+            first_addr = lines[0].split(",")[0].lower()
+            if first_addr.startswith("0x"):
+                first_addr = first_addr[2:]
+            admins.insert(0, "0x" + first_addr)
+    for admin_addr in admins:
+        addr = admin_addr.lower()
+        if addr.startswith("0x"):
+            addr = addr[2:]
+        storage_key = "0xacce55000000000000000000" + addr
+        if "storage" not in gater:
+            gater["storage"] = {}
+        gater["storage"][storage_key] = "0x0000000000000000000000000000000000000000000000000000000000000002"
+    # Add prefix settings
+    settings_json = '''$DEPOSIT_CONTRACT_SETTINGS'''
+    settings = json.loads(settings_json) if settings_json.strip() and settings_json.strip() != '{}' else {}
+    for prefix, value in settings.items():
+        # Gate storage: 0x67617465 ("gate") + zeros + 2-byte prefix
+        pfx = prefix.lower()
+        if pfx.startswith("0x"):
+            pfx = pfx[2:]
+        storage_key = "0x6761746500000000000000000000000000000000000000000000000000" + pfx.zfill(4)
+        gater["storage"][storage_key] = "0x" + hex(int(value))[2:].zfill(64)
+    # Grant DEPOSIT_CONTRACT_ROLE to the deposit contract
+    dep_addr = "$DEPOSIT_CONTRACT".lower()
+    if dep_addr.startswith("0x"):
+        dep_addr = dep_addr[2:]
+    role_key = "0xc0de00000000000000000000" + dep_addr
+    gater["storage"][role_key] = "0x0000000000000000000000000000000000000000000000000000000000000001"
+    genesis["alloc"][gater_address] = gater
+    print(f"  Deployed gater at {gater_address} with {len(admins)} admin(s)")
 
 # Add prefunded accounts
 prefund = json.loads('$PREFUND_ALLOC')
@@ -367,6 +468,7 @@ chainspec = {
         "accountStartNonce": "0x0",
         "maximumExtraDataSize": "0xffff",
         "minGasLimit": "0x1388",
+        "chainID": CHAIN_ID_HEX,
         "networkID": CHAIN_ID_HEX,
         "maxCodeSize": "0x6000",
         "maxCodeSizeTransition": "0x0",
@@ -512,26 +614,54 @@ log "Generating CL config.yaml..."
 
 TOTAL_VALIDATORS=$((VALIDATORS_PER_NODE * NODE_COUNT))
 
+# If genesis_validators_count is set, only include that many in genesis
+if [ -n "$GENESIS_VALIDATORS_COUNT" ] && [ "$GENESIS_VALIDATORS_COUNT" != "null" ]; then
+    GENESIS_VALIDATOR_COUNT=$GENESIS_VALIDATORS_COUNT
+    GENESIS_PER_NODE=$((GENESIS_VALIDATOR_COUNT / NODE_COUNT))
+    DEPOSIT_PER_NODE=$((VALIDATORS_PER_NODE - GENESIS_PER_NODE))
+    log "  Genesis validators: $GENESIS_VALIDATOR_COUNT (of $TOTAL_VALIDATORS total)"
+    log "  Per node: $GENESIS_PER_NODE genesis + $DEPOSIT_PER_NODE deposit = $VALIDATORS_PER_NODE"
+    log "  Remaining $((TOTAL_VALIDATORS - GENESIS_VALIDATOR_COUNT)) validators will be deposited post-genesis"
+else
+    GENESIS_VALIDATOR_COUNT=$TOTAL_VALIDATORS
+    GENESIS_PER_NODE=$VALIDATORS_PER_NODE
+    DEPOSIT_PER_NODE=0
+fi
+
+# Resolve per-node mnemonics (fall back to global)
+get_node_mnemonic() {
+    local node_num=$1
+    if [ -n "$VALIDATOR_MNEMONICS" ] && [ "$VALIDATOR_MNEMONICS" != "null" ]; then
+        local node_mnemonic
+        node_mnemonic=$(read_config_default "validator_mnemonics.node${node_num}" "")
+        if [ -n "$node_mnemonic" ]; then
+            echo "$node_mnemonic"
+            return
+        fi
+    fi
+    echo "$VALIDATOR_MNEMONIC"
+}
+
 cat > "$GENERATED_DIR/cl/config.yaml" << EOF
 PRESET_BASE: 'mainnet'
 CONFIG_NAME: 'allphase-testnet'
 
-MIN_GENESIS_ACTIVE_VALIDATOR_COUNT: $TOTAL_VALIDATORS
+MIN_GENESIS_ACTIVE_VALIDATOR_COUNT: $GENESIS_VALIDATOR_COUNT
 MIN_GENESIS_TIME: $GENESIS_TIMESTAMP
 GENESIS_DELAY: $GENESIS_DELAY
-GENESIS_FORK_VERSION: 0x10000000
+GENESIS_FORK_VERSION: ${FORK_VERSION_PREFIX}00
 
-ALTAIR_FORK_VERSION: 0x20000000
+ALTAIR_FORK_VERSION: ${FORK_VERSION_PREFIX}01
 ALTAIR_FORK_EPOCH: $ALTAIR_FORK_EPOCH
-BELLATRIX_FORK_VERSION: 0x30000000
+BELLATRIX_FORK_VERSION: ${FORK_VERSION_PREFIX}02
 BELLATRIX_FORK_EPOCH: $BELLATRIX_FORK_EPOCH
-CAPELLA_FORK_VERSION: 0x40000000
+CAPELLA_FORK_VERSION: ${FORK_VERSION_PREFIX}03
 CAPELLA_FORK_EPOCH: $CAPELLA_FORK_EPOCH
-DENEB_FORK_VERSION: 0x50000000
+DENEB_FORK_VERSION: ${FORK_VERSION_PREFIX}04
 DENEB_FORK_EPOCH: $DENEB_FORK_EPOCH
-ELECTRA_FORK_VERSION: 0x60000000
+ELECTRA_FORK_VERSION: ${FORK_VERSION_PREFIX}05
 ELECTRA_FORK_EPOCH: $ELECTRA_FORK_EPOCH
-FULU_FORK_VERSION: 0x70000000
+FULU_FORK_VERSION: ${FORK_VERSION_PREFIX}06
 FULU_FORK_EPOCH: $FULU_FORK_EPOCH
 
 SECONDS_PER_SLOT: $SECONDS_PER_SLOT
@@ -626,11 +756,28 @@ log "  -> deposit_contract_block.txt, deploy_block.txt"
 #############################################################################
 log "Generating CL genesis state (genesis.ssz)..."
 
-# Create mnemonics.yaml
-cat > "$GENERATED_DIR/cl/mnemonics.yaml" << EOF
-- mnemonic: "$VALIDATOR_MNEMONIC"
-  count: $TOTAL_VALIDATORS
+# Create mnemonics.yaml (only genesis validators go into genesis.ssz)
+# Each node contributes genesis_per_node validators from its mnemonic
+> "$GENERATED_DIR/cl/mnemonics.yaml"
+for i in $(seq 1 $NODE_COUNT); do
+    NODE_MNEMONIC=$(get_node_mnemonic "$i")
+    if [ -n "$VALIDATOR_MNEMONICS" ] && [ "$VALIDATOR_MNEMONICS" != "null" ]; then
+        # Per-node mnemonics: each node uses source indices [0, genesis_per_node)
+        cat >> "$GENERATED_DIR/cl/mnemonics.yaml" << EOF
+- mnemonic: "$NODE_MNEMONIC"
+  count: $GENESIS_PER_NODE
 EOF
+    else
+        # Single global mnemonic: use start offset to pick correct slice
+        SOURCE_START=$(( (i - 1) * VALIDATORS_PER_NODE ))
+        cat >> "$GENERATED_DIR/cl/mnemonics.yaml" << EOF
+- mnemonic: "$NODE_MNEMONIC"
+  start: $SOURCE_START
+  count: $GENESIS_PER_NODE
+EOF
+    fi
+done
+log "  mnemonics.yaml: $NODE_COUNT entries, $GENESIS_PER_NODE validators each (total $GENESIS_VALIDATOR_COUNT)"
 
 # Use the ethereum-genesis-generator docker image which has eth-genesis-state-generator
 docker run --rm \
@@ -638,7 +785,7 @@ docker run --rm \
     -u "$DOCKER_UID" \
     -v "$GENERATED_DIR/cl:/cl" \
     -v "$GENERATED_DIR/el:/el" \
-    "ethpandaops/ethereum-genesis-generator:master" \
+    "$GENESIS_GEN_IMAGE" \
     eth-genesis-state-generator beaconchain \
     --config /cl/config.yaml \
     --mnemonics /cl/mnemonics.yaml \
@@ -658,8 +805,19 @@ log "  -> $GENERATED_DIR/cl/genesis.ssz"
 log "Generating validator keystores..."
 
 for i in $(seq 1 $NODE_COUNT); do
-    OFFSET=$(( (i - 1) * VALIDATORS_PER_NODE ))
-    log "  Node $i: validators $OFFSET to $((OFFSET + VALIDATORS_PER_NODE - 1))"
+    NODE_MNEMONIC=$(get_node_mnemonic "$i")
+
+    if [ -n "$VALIDATOR_MNEMONICS" ] && [ "$VALIDATOR_MNEMONICS" != "null" ]; then
+        # Per-node mnemonics: each node uses source [0, validators_per_node)
+        SOURCE_MIN=0
+        SOURCE_MAX=$VALIDATORS_PER_NODE
+    else
+        # Single global mnemonic: each node uses source [(i-1)*vpn, i*vpn)
+        SOURCE_MIN=$(( (i - 1) * VALIDATORS_PER_NODE ))
+        SOURCE_MAX=$(( i * VALIDATORS_PER_NODE ))
+    fi
+
+    log "  Node $i: source [$SOURCE_MIN, $SOURCE_MAX) (genesis [$SOURCE_MIN, $((SOURCE_MIN + GENESIS_PER_NODE))), deposit [$((SOURCE_MIN + GENESIS_PER_NODE)), $SOURCE_MAX))"
 
     # Clean with docker since previous keys may be root-owned
     docker run --rm -v "$GENERATED_DIR/keys:/keys" alpine rm -rf "/keys/node${i}" 2>/dev/null || true
@@ -669,13 +827,13 @@ for i in $(seq 1 $NODE_COUNT); do
         --entrypoint "" \
         -u "$DOCKER_UID" \
         -v "$GENERATED_DIR/keys:/keys" \
-        "ethpandaops/ethereum-genesis-generator:master" \
+        "$GENESIS_GEN_IMAGE" \
         sh -c "eth2-val-tools keystores \
             --insecure \
             --prysm-pass password \
-            --source-mnemonic '$VALIDATOR_MNEMONIC' \
-            --source-min $OFFSET \
-            --source-max $((OFFSET + VALIDATORS_PER_NODE)) \
+            --source-mnemonic '$NODE_MNEMONIC' \
+            --source-min $SOURCE_MIN \
+            --source-max $SOURCE_MAX \
             --out-loc /tmp/keys && cp -r /tmp/keys /keys/node${i}"
 
     # Fix permissions on secrets (some clients require restricted access)
@@ -690,21 +848,97 @@ echo -n "password" > "$GENERATED_DIR/keys/prysm-password.txt"
 log "  -> $GENERATED_DIR/keys/prysm-password.txt"
 
 #############################################################################
-# 7. Generate validator names for Dora
+# 7. Generate key distribution manifest & validator names
 #############################################################################
+log "Generating key distribution manifest..."
+
+# Save key-distribution.json (consumed by deposit script and for reference)
+HAS_PER_NODE_MNEMONICS="false"
+if [ -n "$VALIDATOR_MNEMONICS" ] && [ "$VALIDATOR_MNEMONICS" != "null" ]; then
+    HAS_PER_NODE_MNEMONICS="true"
+fi
+
+python3 << PYEOF
+import json
+
+use_per_node = ("$HAS_PER_NODE_MNEMONICS" == "true")
+
+nodes = []
+for i in range(1, $NODE_COUNT + 1):
+    if use_per_node:
+        # Per-node mnemonics: source [0, vpn)
+        source_min = 0
+        source_max = $VALIDATORS_PER_NODE
+    else:
+        # Single global mnemonic: source [(i-1)*vpn, i*vpn)
+        source_min = (i - 1) * $VALIDATORS_PER_NODE
+        source_max = i * $VALIDATORS_PER_NODE
+
+    nodes.append({
+        "node": i,
+        "mnemonic": "",  # filled in below by bash loop
+        "source_min": source_min,
+        "source_max": source_max,
+        "genesis_source_min": source_min,
+        "genesis_source_max": source_min + $GENESIS_PER_NODE,
+        "deposit_source_min": source_min + $GENESIS_PER_NODE,
+        "deposit_source_max": source_max,
+    })
+
+dist = {
+    "total_validators": $TOTAL_VALIDATORS,
+    "genesis_validators_count": $GENESIS_VALIDATOR_COUNT,
+    "validators_per_node": $VALIDATORS_PER_NODE,
+    "genesis_per_node": $GENESIS_PER_NODE,
+    "deposit_per_node": $DEPOSIT_PER_NODE,
+    "genesis_fork_version": "${FORK_VERSION_PREFIX}00",
+    "nodes": nodes,
+}
+
+with open("$GENERATED_DIR/key-distribution.json", "w") as f:
+    json.dump(dist, f, indent=2)
+
+print(f"  -> key-distribution.json ({len(nodes)} nodes)")
+PYEOF
+
+# Fill in actual mnemonics (can't embed shell function in python heredoc)
+for i in $(seq 1 $NODE_COUNT); do
+    NODE_MNEMONIC=$(get_node_mnemonic "$i")
+    python3 -c "
+import json
+with open('$GENERATED_DIR/key-distribution.json') as f:
+    d = json.load(f)
+d['nodes'][$((i-1))]['mnemonic'] = '$NODE_MNEMONIC'
+with open('$GENERATED_DIR/key-distribution.json', 'w') as f:
+    json.dump(d, f, indent=2)
+"
+done
+
 log "Generating validator names..."
 
 # Node-to-client mapping (must match 01_start_network.sh)
 NODE_CLIENTS=("geth/lighthouse" "geth/lodestar" "besu/prysm" "reth/teku" "nethermind/grandine")
 
+# Validator names: beacon indices 0..genesis_count-1 are genesis, assigned in node order
+# Deposit validators get beacon indices starting from genesis_count in deposit order
 NAMES_FILE="$GENERATED_DIR/validator-names.yaml"
 > "$NAMES_FILE"
+BEACON_IDX=0
 for i in $(seq 1 $NODE_COUNT); do
-    OFFSET=$(( (i - 1) * VALIDATORS_PER_NODE ))
-    END=$(( OFFSET + VALIDATORS_PER_NODE - 1 ))
     CLIENT="${NODE_CLIENTS[$((i - 1))]}"
-    echo "${OFFSET}-${END}: \"node${i} - ${CLIENT}\"" >> "$NAMES_FILE"
+    END=$((BEACON_IDX + GENESIS_PER_NODE - 1))
+    echo "${BEACON_IDX}-${END}: \"node${i} - ${CLIENT} (genesis)\"" >> "$NAMES_FILE"
+    BEACON_IDX=$((END + 1))
 done
+# Deposit validators: labeled per node in deposit order
+if [ "$DEPOSIT_PER_NODE" -gt 0 ]; then
+    for i in $(seq 1 $NODE_COUNT); do
+        CLIENT="${NODE_CLIENTS[$((i - 1))]}"
+        END=$((BEACON_IDX + DEPOSIT_PER_NODE - 1))
+        echo "${BEACON_IDX}-${END}: \"node${i} - ${CLIENT} (deposit)\"" >> "$NAMES_FILE"
+        BEACON_IDX=$((END + 1))
+    done
+fi
 
 log "  -> $NAMES_FILE"
 
@@ -715,8 +949,18 @@ log ""
 log "=== Genesis Generation Complete ==="
 log "  Chain ID:          $CHAIN_ID"
 log "  CL Genesis Time:   $CL_GENESIS_TIME ($(date -d @$CL_GENESIS_TIME '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r $CL_GENESIS_TIME '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo 'N/A'))"
+log "  Fork Versions:     ${FORK_VERSION_PREFIX}00..${FORK_VERSION_PREFIX}06"
 log "  TTD:               $TTD"
 log "  Total Validators:  $TOTAL_VALIDATORS"
+log "  Genesis Validators: $GENESIS_VALIDATOR_COUNT ($GENESIS_PER_NODE per node)"
+if [ "$GENESIS_VALIDATOR_COUNT" -lt "$TOTAL_VALIDATORS" ]; then
+    log "  Post-Genesis Deps: $((TOTAL_VALIDATORS - GENESIS_VALIDATOR_COUNT)) ($DEPOSIT_PER_NODE per node)"
+fi
+if [ "$DEPOSIT_CONTRACT_GATED" = "true" ] || [ "$DEPOSIT_CONTRACT_GATED" = "True" ]; then
+    log "  Deposit Contract:  GATED ($DEPOSIT_CONTRACT + gater $GATER_ADDRESS)"
+else
+    log "  Deposit Contract:  Standard ($DEPOSIT_CONTRACT)"
+fi
 log "  EL Genesis Hash:   $EL_GENESIS_HASH"
 log ""
 log "  Files in $GENERATED_DIR/"

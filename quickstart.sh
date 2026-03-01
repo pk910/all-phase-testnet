@@ -94,14 +94,26 @@ merge_boost() {
 merge_boost &
 MERGE_BOOST_PID=$!
 
-#--- Swap daemon (foreground in this session) ---
+#--- Swap daemon (background) ---
 log "Starting swap daemon..."
 bash "$PROJECT_DIR/scripts/02_swap_clients.sh" daemon &
 SWAP_PID=$!
 
-# Wait for both
+#--- Post-genesis deposits (background, if configured) ---
+DEPOSIT_PID=""
+GENESIS_VALIDATORS_COUNT=$(read_config_default "genesis_validators_count" "")
+if [ -n "$GENESIS_VALIDATORS_COUNT" ] && [ "$GENESIS_VALIDATORS_COUNT" != "null" ]; then
+    log "Starting post-genesis deposit daemon..."
+    bash "$PROJECT_DIR/scripts/04_post_genesis_deposits.sh" &
+    DEPOSIT_PID=$!
+fi
+
+# Wait for all
 wait "$MERGE_BOOST_PID" 2>/dev/null || true
 wait "$SWAP_PID" 2>/dev/null || true
+if [ -n "$DEPOSIT_PID" ]; then
+    wait "$DEPOSIT_PID" 2>/dev/null || true
+fi
 
 log "All background tasks finished."
 echo "Press enter to close."
@@ -137,19 +149,24 @@ echo ""
 echo "Services:"
 echo "  Dora explorer:      http://localhost:8090"
 echo "  Spamoor:            http://localhost:8091"
+BLOCKSCOUT_ENABLED=$(read_config_default "blockscout_enabled" "true")
+if [ "$BLOCKSCOUT_ENABLED" = "true" ] || [ "$BLOCKSCOUT_ENABLED" = "True" ]; then
 echo "  Blockscout:         http://localhost:3000"
+fi
 echo ""
 echo "EL RPC:"
 echo "  Node 1 (geth):      http://localhost:8545"
 echo "  Node 2 (geth):      http://localhost:8546"
 echo "  Node 3 (besu):      http://localhost:8547"
 echo "  Node 4 (reth):      http://localhost:8548"
+echo "  Node 5 (geth):       http://localhost:8549"
 echo ""
 echo "CL API:"
 echo "  Node 1 (lighthouse): http://localhost:5052"
 echo "  Node 2 (lodestar):   http://localhost:5053"
 echo "  Node 3 (prysm):      http://localhost:5054"
 echo "  Node 4 (teku):       http://localhost:5055"
+echo "  Node 5 (grandine):   http://localhost:5056"
 echo ""
 echo "Background tasks (tmux/screen session 'allphase-tasks'):"
 echo "  - Merge boost: starts extra miner before bellatrix, stops after merge"

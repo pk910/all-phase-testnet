@@ -5,11 +5,17 @@ chain_id: 1337
 deposit_contract_address: "0x00000000219ab540356cBB839Cbe05303d7705Fa"
 network_name: "allphase-testnet"
 
+# Genesis generator Docker image
+genesis_generator_image: "ethpandaops/ethereum-genesis-generator:rebuild-gated-deposit-contract"
+
 # Timing
 # genesis_timestamp: 0              # optional: fixed unix timestamp; if omitted, uses current time
 genesis_delay: 120                   # seconds after genesis generation before chain starts
 seconds_per_slot: 12
 slots_per_epoch: 32
+
+# Fork version prefix (3 bytes, last byte is fork ID: 00=genesis, 01=altair, ...)
+fork_version_prefix: "0x100000"
 
 # Fork schedule (CL epochs)
 altair_fork_epoch: 1
@@ -31,7 +37,26 @@ genesis_difficulty: "0x80000"
 
 # Validators (per node)
 validators_per_node: 128
+# genesis_validators_count: 320    # if set, only this many validators in genesis state
+                                   # remaining deposited post-genesis via deposit transactions
+                                   # keys are split per-node: each node gets genesis_count/NODE_COUNT
+                                   # genesis validators + the rest as post-genesis deposits
 validator_mnemonic: "test test test test test test test test test test test junk"
+
+# Per-node validator mnemonics (optional)
+# If set, each node uses its own mnemonic for key derivation instead of the global validator_mnemonic.
+# Nodes without an entry fall back to the global validator_mnemonic.
+# validator_mnemonics:
+#   node1: "mnemonic for node 1..."
+#   node2: "mnemonic for node 2..."
+
+# Gated deposit contract (optional)
+# deposit_contract_gated: true           # deploy gated deposit contract instead of standard
+# deposit_contract_admins: []            # additional admin addresses (1st prefunded account is always admin)
+# deposit_contract_settings:             # withdrawal credential prefix gating settings
+#   "0x00": 0                            # 0x00 prefix: requires token (value 0)
+#   "0x01": 0                            # 0x01 prefix: requires token
+#   "0xffff": 2                          # topups: no token required (value 2)
 
 # Pre-funded accounts
 prefund_mnemonic: "test test test test test test test test test test test junk"
@@ -47,6 +72,7 @@ el_image_old_besu: "hyperledger/besu:24.10.0"
 el_image_new_geth: "ethereum/client-go:latest"
 el_image_new_besu: "hyperledger/besu:latest"
 el_image_reth: "ghcr.io/paradigmxyz/reth:latest"
+el_image_nethermind: "nethermind/nethermind:latest"
 
 # CL Client images
 cl_image_old_teku: "consensys/teku:25.1.0"       # last version with TTD merge support (removed in 25.2.0)
@@ -58,9 +84,14 @@ cl_image_old_lodestar: "chainsafe/lodestar:v1.38.0"
 cl_image_lodestar: "chainsafe/lodestar:latest"
 cl_image_prysm_beacon: "gcr.io/prysmaticlabs/prysm/beacon-chain:v7.1.2"
 cl_image_prysm_validator: "gcr.io/prysmaticlabs/prysm/validator:v7.1.2"
+cl_image_grandine: "sifrai/grandine:latest"
 
 # Explorer
 dora_image: "ethpandaops/dora:latest"
+
+# Checkpoint sync provider
+checkpointz_enabled: true
+checkpointz_image: "ethpandaops/checkpointz:latest"
 
 # Spammer
 spamoor_image: "ethpandaops/spamoor:latest"
@@ -73,6 +104,7 @@ spamoor_startup_spammers:
       max_wallets: 20
 
 # Blockscout
+blockscout_enabled: true                  # set false to skip launching blockscout (saves resources)
 blockscout_image: "ghcr.io/blockscout/blockscout:latest"
 blockscout_frontend_image: "ghcr.io/blockscout/frontend:latest"
 blockscout_verif_image: "ghcr.io/blockscout/smart-contract-verifier:latest"

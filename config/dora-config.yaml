@@ -15,6 +15,26 @@ frontend:
   siteName: "Dora the Explorer"
   siteSubtitle: "All-Phase Testnet"
   validatorNamesYaml: "/validator-names.yaml"
+  rainbowkitProjectId: "15fe4ab4d5c0bcb6f0dc7c398301ff0e"
+  showSensitivePeerInfos: true
+  showSubmitDeposit: true
+  showSubmitElRequests: true
+  showPeerDASInfos: true
+  disableDasGuardianCheck: false
+  enableDasGuardianMassScan: true
+  showValidatorSummary: true
+
+api:
+  enabled: true
+  corsOrigins:
+    - "*"
+  defaultRateLimit: 60
+
+rpcProxy:
+  enabled: true
+  upstreamUrl: "http://allphase-node1-el:8545"
+  requestsPerMinute: 6000
+  burstLimit: 10000
 
 beaconapi:
   endpoints:
@@ -26,6 +46,8 @@ beaconapi:
       name: "Prysm"
     - url: "http://allphase-node4-cl:5052"
       name: "Teku"
+    - url: "http://allphase-node5-cl:5052"
+      name: "Grandine"
 
 executionapi:
   endpoints:
@@ -37,11 +59,29 @@ executionapi:
       name: "Besu"
     - url: "http://allphase-node4-el:8545"
       name: "Reth"
+    - url: "http://allphase-node5-el:8545"
+      name: "Nethermind"
   depositLogBatchSize: 1000
 
 indexer:
   inMemoryEpochs: 8
   disableSynchronizer: false
+
+executionIndexer:
+  enabled: true
+  retention: 4368h
+  detailsEnabled: true
+  tracesEnabled: true
+  detailsMaxSize: "100GB"
+
+txsig:
+  cbtBaseUrl: "https://cbt-api-mainnet.analytics.production.platform.ethpandaops.io/api/v1/dim_function_signature"
+
+blockDb:
+  engine: "pebble"
+  pebble:
+    path: "/data/blockdb.peb"
+    cacheSize: 100
 
 database:
   engine: "sqlite"

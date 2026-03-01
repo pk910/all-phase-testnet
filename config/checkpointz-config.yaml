@@ -1,0 +1,34 @@
+global:
+  listenAddr: ":5555"
+  logging: "info"
+  metricsAddr: ":9090"
+
+checkpointz:
+  mode: full
+  caches:
+    blocks:
+      max_items: 200
+    states:
+      max_items: 5
+  historical_epoch_count: 20
+  frontend:
+    enabled: true
+    brand_name: "All-Phase Testnet"
+
+beacon:
+  upstreams:
+  - name: node1-lighthouse
+    address: http://allphase-node1-cl:5052
+    dataProvider: true
+  - name: node2-lodestar
+    address: http://allphase-node2-cl:5051
+    dataProvider: true
+  - name: node3-prysm
+    address: http://allphase-node3-cl:3500
+    dataProvider: true
+  - name: node4-teku
+    address: http://allphase-node4-cl:5052
+    dataProvider: true
+  - name: node5-grandine
+    address: http://allphase-node5-cl:5052
+    dataProvider: true
